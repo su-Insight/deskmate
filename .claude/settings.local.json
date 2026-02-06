@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build:electron)",
+      "Bash(npx electron-builder --win --dir)",
+      "Bash(dir:*)",
+      "Bash(tsc:*)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

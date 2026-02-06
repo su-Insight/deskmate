@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>系统监控</title>
+  <link rel="stylesheet" href="../libs/fontawesome/css/all.min.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg-color: rgba(30, 30, 40, 0.95);
+      --border-color: rgba(255,255,255,0.1);
+      --text-primary: #fff;
+      --text-secondary: rgba(255,255,255,0.6);
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-color);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      backdrop-filter: blur(20px);
+    }
+    .title-bar {
+      height: 32px;
+      background: rgba(0,0,0,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      cursor: grab;
+      -webkit-app-region: drag;
+    }
+    .title-bar .left { display: flex; align-items: center; gap: 8px; }
+    .title-bar .icon {
+      width: 22px; height: 22px;
+      background: rgba(99,102,241,0.2);
+      border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      color: #6366f1; font-size: 11px;
+    }
+    .title-bar .title { font-size: 11px; color: var(--text-secondary); }
+    .title-bar .controls button {
+      width: 18px; height: 18px; border-radius: 4px; border: none;
+      cursor: pointer; background: transparent; color: var(--text-secondary); font-size: 9px;
+    }
+    .title-bar .controls button:hover { background: var(--border-color); color: #fff; }
+    .title-bar .controls button.close:hover { background: rgba(239,68,68,0.3); color: #ef4444; }
+    .stats { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+    .stat-item { display: flex; align-items: center; gap: 10px; }
+    .stat-item .icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+    .stat-item .info { flex: 1; }
+    .stat-item .label { font-size: 10px; color: var(--text-secondary); margin-bottom: 4px; }
+    .stat-item .value { font-size: 14px; font-weight: 500; }
+    .stat-item .bar { height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+    .stat-item .bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+    .cpu .icon { background: rgba(79,172,254,0.2); color: #4facfe; }
+    .cpu .bar-fill { background: #4facfe; width: 45%; }
+    .memory .icon { background: rgba(168,85,247,0.2); color: #a855f7; }
+    .memory .bar-fill { background: #a855f7; width: 62%; }
+    .disk .icon { background: rgba(16,185,129,0.2); color: #10b981; }
+    .disk .bar-fill { background: #10b981; width: 38%; }
+    .time { padding: 8px 12px; border-top: 1px solid var(--border-color); display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); }
+  </style>
+</head>
+<body>
+  <div class="title-bar">
+    <div class="left">
+      <div class="icon"><i class="fa-solid fa-desktop"></i></div>
+      <span class="title">系统监控</span>
+    </div>
+    <div class="controls">
+      <button class="minimize"><i class="fa-solid fa-minus"></i></button>
+      <button class="close"><i class="fa-solid fa-times"></i></button>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat-item cpu">
+      <div class="icon"><i class="fa-solid fa-microchip"></i></div>
+      <div class="info">
+        <div class="label">CPU 使用率</div>
+        <div class="value" id="cpuValue">45%</div>
+        <div class="bar"><div class="bar-fill" id="cpuBar"></div></div>
+      </div>
+    </div>
+    <div class="stat-item memory">
+      <div class="icon"><i class="fa-solid fa-memory"></i></div>
+      <div class="info">
+        <div class="label">内存使用</div>
+        <div class="value" id="memValue">62%</div>
+        <div class="bar"><div class="bar-fill" id="memBar"></div></div>
+      </div>
+    </div>
+    <div class="stat-item disk">
+      <div class="icon"><i class="fa-solid fa-hdd"></i></div>
+      <div class="info">
+        <div class="label">磁盘使用</div>
+        <div class="value" id="diskValue">38%</div>
+        <div class="bar"><div class="bar-fill" id="diskBar"></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="time">
+    <span id="date"></span>
+    <span id="clock"></span>
+  </div>
+  <script>
+    document.querySelector('.minimize').onclick = () => window.close();
+    document.querySelector('.close').onclick = () => window.close();
+    function updateTime() {
+      const now = new Date();
+      document.getElementById('date').textContent = now.toLocaleDateString('zh-CN');
+      document.getElementById('clock').textContent = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    }
+    updateTime();
+    setInterval(updateTime, 1000);
+    // 模拟更新数据
+    function updateStats() {
+      document.getElementById('cpuValue').textContent = Math.floor(Math.random() * 60 + 20) + '%';
+      document.getElementById('cpuBar').style.width = Math.floor(Math.random() * 60 + 20) + '%';
+      document.getElementById('memValue').textContent = Math.floor(Math.random() * 30 + 50) + '%';
+      document.getElementById('memBar').style.width = Math.floor(Math.random() * 30 + 50) + '%';
+    }
+    updateStats();
+    setInterval(updateStats, 3000);
+  </script>
+</body>
+</html>

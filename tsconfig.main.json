@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./dist/main",
+    "rootDir": "./src/main",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "target": "ES2020",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "allowImportingTsExtensions": false,
+    "strict": false,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/main/index.ts", "src/main/handlers", "src/main/services"]
+}

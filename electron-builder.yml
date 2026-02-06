@@ -1,0 +1,20 @@
+appId: com.deskmate.app
+productName: DeskMate
+directories:
+  output: dist
+files:
+  - dist
+  - package.json
+extraFiles:
+  - backend
+win:
+  target: zip
+  certificateFile: ""
+  certificatePassword: ""
+  signAndEditExecutable: false
+  signDlls: false
+mac:
+  target: dmg
+  category: public.app-category.productivity
+linux:
+  target: AppImage

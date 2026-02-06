@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文件管理</title>
+  <link rel="stylesheet" href="../libs/fontawesome/css/all.min.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-color: rgba(30, 30, 40, 0.95);
+      --border-color: rgba(255,255,255,0.1);
+      --hover-color: rgba(255,255,255,0.1);
+      --text-primary: #fff;
+      --text-secondary: rgba(255,255,255,0.6);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-color);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      backdrop-filter: blur(20px);
+    }
+
+    /* 标题栏 - 可拖拽 */
+    .title-bar {
+      height: 36px;
+      background: rgba(0,0,0,0.2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      cursor: grab;
+      user-select: none;
+      -webkit-app-region: drag;
+    }
+
+    .title-bar:active {
+      cursor: grabbing;
+    }
+
+    .title-bar .left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .title-bar .icon {
+      width: 24px;
+      height: 24px;
+      background: rgba(251, 191, 36, 0.2);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fbbf24;
+      font-size: 12px;
+    }
+
+    .title-bar .title {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .title-bar .controls {
+      display: flex;
+      gap: 4px;
+      -webkit-app-region: no-drag;
+    }
+
+    .title-bar .controls button {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.15s;
+    }
+
+    .title-bar .controls button:hover {
+      background: var(--hover-color);
+      color: #fff;
+    }
+
+    .title-bar .controls button.close:hover {
+      background: rgba(239,68,68,0.3);
+      color: #ef4444;
+    }
+
+    /* 工具栏 */
+    .toolbar {
+      padding: 8px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      gap: 8px;
+    }
+
+    .toolbar button {
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 11px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+
+    .toolbar button:hover {
+      background: var(--hover-color);
+      color: #fff;
+    }
+
+    .path-bar {
+      flex: 1;
+      padding: 6px 10px;
+      background: rgba(0,0,0,0.2);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 11px;
+      outline: none;
+    }
+
+    .path-bar:focus {
+      border-color: rgba(79,172,254,0.5);
+    }
+
+    /* 文件列表 */
+    .file-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+      gap: 10px;
+    }
+
+    .file-item:hover {
+      background: var(--hover-color);
+    }
+
+    .file-item i {
+      font-size: 16px;
+      width: 24px;
+      text-align: center;
+    }
+
+    .file-item .name {
+      flex: 1;
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-item .size {
+      font-size: 10px;
+      color: var(--text-secondary);
+    }
+
+    .file-item.folder i { color: #fbbf24; }
+    .file-item.file i { color: var(--text-secondary); }
+    .file-item.image i { color: #a855f7; }
+    .file-item.video i { color: #ef4444; }
+
+    /* 滚动条 */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+  </style>
+</head>
+<body>
+  <div class="title-bar">
+    <div class="left">
+      <div class="icon"><i class="fa-solid fa-folder"></i></div>
+      <span class="title">文件管理</span>
+    </div>
+    <div class="controls">
+      <button class="minimize"><i class="fa-solid fa-minus"></i></button>
+      <button class="close"><i class="fa-solid fa-times"></i></button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <button onclick="goBack()"><i class="fa-solid fa-arrow-left"></i> 返回</button>
+    <button onclick="goForward()"><i class="fa-solid fa-arrow-right"></i> 前进</button>
+    <button onclick="goUp()"><i class="fa-solid fa-folder-up"></i> 上级</button>
+    <input type="text" class="path-bar" id="pathBar" value="" placeholder="输入路径...">
+    <button onclick="navigateToPath()"><i class="fa-solid fa-arrow-right"></i></button>
+  </div>
+
+  <div class="file-list" id="fileList">
+    <div class="file-item">
+      <i class="fa-solid fa-spinner fa-spin"></i>
+      <span class="name">加载中...</span>
+    </div>
+  </div>
+
+  <script>
+    const { deskmate } = window;
+    let currentPath = '';
+    let history = [];
+    let historyIndex = -1;
+
+    // 窗口控制
+    document.querySelector('.minimize').onclick = () => window.close();
+    document.querySelector('.close').onclick = () => window.close();
+
+    // 初始路径
+    async function init() {
+      const homePath = process.env.USERPROFILE || process.env.HOME || 'C:\\Users';
+      await navigateTo(homePath);
+    }
+
+    async function navigateTo(path) {
+      currentPath = path;
+      document.getElementById('pathBar').value = path;
+
+      // 添加到历史记录
+      history = history.slice(0, historyIndex + 1);
+      history.push(path);
+      historyIndex = history.length - 1;
+
+      try {
+        const files = await deskmate?.fs?.readDir?.(path) || [];
+        renderFiles(files);
+      } catch (e) {
+        document.getElementById('fileList').innerHTML = `
+          <div class="file-item">
+            <i class="fa-solid fa-exclamation-triangle"></i>
+            <span class="name">无法访问: ${path}</span>
+          </div>
+        `;
+      }
+    }
+
+    function renderFiles(files) {
+      const list = document.getElementById('fileList');
+
+      // 排序: 文件夹在前
+      files.sort((a, b) => {
+        if (a.isDirectory && !b.isDirectory) return -1;
+        if (!a.isDirectory && b.isDirectory) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      if (files.length === 0) {
+        list.innerHTML = `
+          <div class="file-item">
+            <i class="fa-solid fa-folder-open"></i>
+            <span class="name">空文件夹</span>
+          </div>
+        `;
+        return;
+      }
+
+      list.innerHTML = files.map(file => `
+        <div class="file-item ${file.isDirectory ? 'folder' : 'file'}" onclick="handleClick('${file.path}', ${file.isDirectory})">
+          <i class="fa-solid ${file.isDirectory ? 'fa-folder' : getFileIcon(file.name)}"></i>
+          <span class="name">${file.name}</span>
+          <span class="size">${file.isDirectory ? '' : formatSize(file.size)}</span>
+        </div>
+      `).join('');
+    }
+
+    function getFileIcon(name) {
+      const ext = name.split('.').pop().toLowerCase();
+      const icons = {
+        'jpg': 'fa-image', 'jpeg': 'fa-image', 'png': 'fa-image', 'gif': 'fa-image', 'svg': 'fa-image',
+        'mp4': 'fa-video', 'avi': 'fa-video', 'mkv': 'fa-video',
+        'mp3': 'fa-music', 'wav': 'fa-music', 'flac': 'fa-music',
+        'pdf': 'fa-file-pdf', 'doc': 'fa-file-word', 'docx': 'fa-file-word',
+        'xls': 'fa-file-excel', 'xlsx': 'fa-file-excel',
+        'zip': 'fa-file-zipper', 'rar': 'fa-file-zipper', '7z': 'fa-file-zipper',
+        'js': 'fa-file-code', 'ts': 'fa-file-code', 'py': 'fa-file-code',
+        'json': 'fa-file-code', 'html': 'fa-file-code', 'css': 'fa-file-code'
+      };
+      return icons[ext] || 'fa-file';
+    }
+
+    function formatSize(bytes) {
+      if (!bytes) return '';
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${sizes[i]}`;
+    }
+
+    async function handleClick(path, isDirectory) {
+      if (isDirectory) {
+        await navigateTo(path);
+      } else {
+        deskmate?.utils?.showItemInFolder?.(path);
+      }
+    }
+
+    async function goBack() {
+      if (historyIndex > 0) {
+        historyIndex--;
+        await navigateTo(history[historyIndex]);
+      }
+    }
+
+    function goForward() {
+      if (historyIndex < history.length - 1) {
+        historyIndex++;
+        navigateTo(history[historyIndex]);
+      }
+    }
+
+    async function goUp() {
+      const parent = require('path').dirname(currentPath);
+      if (parent !== currentPath) {
+        await navigateTo(parent);
+      }
+    }
+
+    async function navigateToPath() {
+      const path = document.getElementById('pathBar').value.trim();
+      if (path) {
+        await navigateTo(path);
+      }
+    }
+
+    // 初始化
+    init();
+  </script>
+</body>
+</html>
