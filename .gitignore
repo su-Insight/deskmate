@@ -62,3 +62,4 @@ coverage/
 *.local
 .temp/
 tmp/
+nul

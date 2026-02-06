@@ -1,5 +1,20 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
+const iconModules = import.meta.glob('../../public/icons/*.svg', { eager: true, as: 'url' });
+
+// 2. 辅助函数
+function getProviderIconUrl(providerId: string | undefined): string {
+  if (!providerId) return '';
+
+  // 构建 key，注意这里要匹配 glob 里的相对路径写法
+  const key = `../renderer/icons/${providerId}.svg`;
+
+  return key
+  
+  // 返回 Vite 处理后的最终路径 (开发时是 /src/..., 打包后是 assets/xxx.hash.svg)
+  // return iconModules[key] || '';
+}
+
 // 扩展 Window 接口以支持 deskmate
 declare global {
   interface Window {
@@ -736,16 +751,12 @@ function SettingsView() {
         return JSON.parse(saved);
       } catch {
         return [
-          { id: '1', name: 'GPT-4o Main', remark: '', provider: 'openai', model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1', temperature: 0.7, enabled: true },
-          { id: '2', name: 'GPT-4o Mini', remark: '', provider: 'openai', model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1', temperature: 0.5, enabled: false },
-          { id: '3', name: 'DeepSeek Code', remark: '', provider: 'deepseek', model: 'deepseek-coder', baseUrl: 'https://api.deepseek.com/v1', temperature: 0.8, enabled: false },
+          { id: '1', name: 'DeepSeek', remark: '测试配置', provider: 'deepseek', model: 'deepseek-chat', baseUrl: 'https://api.deepseek.com/v1', temperature: 0.8, enabled: false },
         ];
       }
     }
     return [
-      { id: '1', name: 'GPT-4o Main', remark: '', provider: 'openai', model: 'gpt-4o', baseUrl: 'https://api.openai.com/v1', temperature: 0.7, enabled: true },
-      { id: '2', name: 'GPT-4o Mini', remark: '', provider: 'openai', model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1', temperature: 0.5, enabled: false },
-      { id: '3', name: 'DeepSeek Code', remark: '', provider: 'deepseek', model: 'deepseek-coder', baseUrl: 'https://api.deepseek.com/v1', temperature: 0.8, enabled: false },
+      { id: '1', name: 'DeepSeek', remark: '测试配置', provider: 'deepseek', model: 'deepseek-chat', baseUrl: 'https://api.deepseek.com/v1', temperature: 0.8, enabled: false },
     ];
   });
 
@@ -757,29 +768,52 @@ function SettingsView() {
   // API Key 获取链接
   const getApiKeyUrl = () => {
     const urls: Record<string, string> = {
-      openai: 'https://platform.openai.com/api-keys',
       deepseek: 'https://platform.deepseek.com/api-keys',
-      zhipu: 'https://open.bigmodel.cn/usercenter/apikeys',
-      minimax: 'https://api.minimax.chat/user-center/basic-information',
       kimi: 'https://platform.moonshot.cn/console/api-keys',
-      nvidia: 'https://build.nvidia.com/',
-      gemini: 'https://aistudio.google.com/app/apikey',
-      anthropic: 'https://console.anthropic.com/',
+      zhipu: 'https://open.bigmodel.cn/usercenter/apikeys',
+      qwen: 'https://help.aliyun.com/zh/model-studio/get-api-key',
+      hunyuan: 'https://console.cloud.tencent.com/hunyuan/api-key',
+      minimax: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+      baichuan: 'https://platform.baichuan-ai.com/docs/api',
+      wenxin: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
+
+      // ********** 境外访问 **********
+      openrouter: 'https://openrouter.ai/settings/management-keys',
+      siliconflow: 'https://cloud.siliconflow.cn/account/ak',
+      xai: 'https://console.x.ai/team/default/api-keys',
+      mistral: 'https://console.mistral.ai/home?workspace_dialog=apiKeys',
+      nvidia: 'https://build.nvidia.com/settings/api-keys',
+
+      // openai: 'https://platform.openai.com/api-keys',
+      // gemini: 'https://aistudio.google.com/app/apikey',
+      // anthropic: 'https://console.anthropic.com/',
     };
     return urls[selectedProvider] || '';
   };
 
-  // AI 厂商配置
+// AI 厂商配置
   const providers = [
-    { id: 'openai', name: 'OpenAI', icon: 'fa-brain', color: '#10A37F', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'], defaultUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o', websiteUrl: 'https://openai.com' },
-    { id: 'deepseek', name: 'DeepSeek', icon: 'fa-bolt', color: '#0050EF', models: ['deepseek-chat', 'deepseek-coder'], defaultUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-chat', websiteUrl: 'https://www.deepseek.com' },
-    { id: 'zhipu', name: '智谱 GLM', icon: 'fa-robot', color: '#4267FF', models: ['glm-4', 'glm-4-plus', 'glm-4v', 'glm-3-turbo'], defaultUrl: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-4', websiteUrl: 'https://www.bigmodel.cn' },
-    { id: 'minimax', name: 'MiniMax', icon: 'fa-microchip', color: '#6C5CE7', models: ['M2-her', 'abab6.5s-chat', 'abab6.5-chat'], defaultUrl: 'https://api.minimax.chat/v1', defaultModel: 'M2-her', websiteUrl: 'https://www.minimaxi.com' },
-    { id: 'kimi', name: 'Kimi', icon: 'fa-moon', color: '#3B82F6', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], defaultUrl: 'https://api.moonshot.cn/v1', defaultModel: 'moonshot-v1-8k', websiteUrl: 'https://www.moonshot.cn' },
-    { id: 'nvidia', name: 'NVIDIA', icon: 'fa-server', color: '#76B900', models: ['nvidia/llama-3.1-nemotron-70b-instruct', 'nvidia/llama-3.1-nemotron-80b-instruct'], defaultUrl: 'https://integrate.api.nvidia.com/v1', defaultModel: 'nvidia/llama-3.1-nemotron-70b-instruct', websiteUrl: 'https://www.nvidia.com' },
-    { id: 'gemini', name: 'Google Gemini', icon: 'fa-google', color: '#4285F4', models: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro'], defaultUrl: 'https://generativelanguage.googleapis.com/v1beta', defaultModel: 'gemini-1.5-flash', websiteUrl: 'https://gemini.google.com' },
-    { id: 'anthropic', name: 'Claude', icon: 'fa-comments', color: '#D97757', models: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'], defaultUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-3-5-sonnet-20241022', websiteUrl: 'https://www.anthropic.com' },
+    { id: 'deepseek', name: 'DeepSeek', icon: 'fa-bolt', color: '#6069ff', models: [], defaultUrl: 'https://api.deepseek.com', defaultModel: 'deepseek-chat', websiteUrl: 'https://www.deepseek.com' },
+    { id: 'kimi', name: 'Kimi', icon: 'fa-moon', color: '#ff6b4d', models: [], defaultUrl: 'https://api.moonshot.cn/v1', defaultModel: 'kimi-k2.5', websiteUrl: 'https://www.moonshot.cn' },
+    { id: 'zhipu', name: '智谱 GLM', icon: 'fa-robot', color: '#3147ea', models: [], defaultUrl: 'https://open.bigmodel.cn/api/paas/v4', defaultModel: 'glm-4.7', websiteUrl: 'https://www.bigmodel.cn' },
+    { id: 'qwen', name: 'Qwen', icon: 'fa-brain', color: '#615ced', models: [], defaultUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen3-max', websiteUrl: 'https://tongyi.aliyun.com/' },
+    { id: 'hunyuan', name: 'Hunyuan', icon: 'fa-brain', color: '#0052d9', models: [], defaultUrl: 'https://api.hunyuan.cloud.tencent.com/v1', defaultModel: 'hunyuan-T1', websiteUrl: 'https://hunyuan.tencent.com/' },
+    { id: 'minimax', name: 'MiniMax', icon: 'fa-microchip', color: '#6535d2', models: [], defaultUrl: 'https://api.minimaxi.com/v1', defaultModel: 'MiniMax-M2.1', websiteUrl: 'https://www.minimaxi.com' },
+    { id: 'baichuan', name: 'Baichuan', icon: 'fa-microchip', color: '#ff5a00', models: [], defaultUrl: 'https://api.baichuan-ai.com/v1/', defaultModel: 'Baichuan-M3-Plus', websiteUrl: 'https://www.baichuan-ai.com/home' },
+    { id: 'wenxin', name: 'Wenxin', icon: 'fa-microchip', color: '#2a69ff', models: [], defaultUrl: 'https://qianfan.baidubce.com/v2', defaultModel: 'ernie-4.5-turbo', websiteUrl: 'https://cloud.baidu.com/' },
+
+    // ********** 境外访问 **********
+    { id: 'openrouter', name: 'OpenRouter', icon: 'fa-brain', color: '#651fff', models: [], defaultUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-5.2', websiteUrl: 'https://openrouter.ai/' },
+    { id: 'siliconflow', name: 'SiliconFlow', icon: 'fa-brain', color: '#000000', models: [], defaultUrl: 'https://api.siliconflow.cn/v1', defaultModel: 'Qwen/Qwen2.5-72B-Instruct', websiteUrl: 'https://www.siliconflow.cn/' },
+    { id: 'xai', name: 'Grok', icon: 'fa-brain', color: '#000000', models: [], defaultUrl: 'https://api.x.ai/v1', defaultModel: 'grok-4-1-fast-reasoning', websiteUrl: 'https://x.ai/' },
+    { id: 'mistral', name: 'Mistral', icon: 'fa-brain', color: '#f5d835', models: [], defaultUrl: 'https://api.mistral.ai/v1', defaultModel: 'open-mistral-7b', websiteUrl: 'https://mistral.ai/' },
+    { id: 'nvidia', name: 'NVIDIA', icon: 'fa-server', color: '#76b900', models: [], defaultUrl: 'https://integrate.api.nvidia.com/v1', defaultModel: 'nvidia/llama-3.1-nemotron-70b-instruct', websiteUrl: 'https://build.nvidia.com/' },
     { id: 'custom', name: '自定义', icon: 'fa-cog', color: '#6B7280', models: [], defaultUrl: '', defaultModel: '', websiteUrl: '' },
+
+
+    // { id: 'openai', name: 'OpenAI', icon: 'fa-brain', color: '#10A37F', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo'], defaultUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o', websiteUrl: 'https://openai.com' },
+    // { id: 'gemini', name: 'Google Gemini', icon: 'fa-google', color: '#4285F4', models: ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-1.0-pro'], defaultUrl: 'https://generativelanguage.googleapis.com/v1beta', defaultModel: 'gemini-1.5-flash', websiteUrl: 'https://gemini.google.com' },
+    // { id: 'anthropic', name: 'Claude', icon: 'fa-comments', color: '#D97757', models: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'], defaultUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-3-5-sonnet-20241022', websiteUrl: 'https://www.anthropic.com' },
   ];
 
   // Tab 配置 - API配置默认隐藏，通过新建配置按钮访问
@@ -906,6 +940,17 @@ function SettingsView() {
     if (provider && provider.id !== 'custom') {
       setBaseUrl(provider.defaultUrl || '');
       setModelName(provider.defaultModel);
+      // 编辑模式下，只有当配置名称等于原厂商名称时才更新
+      if (editingProvider) {
+        const currentConfig = modelConfigs.find(c => c.id === editingProvider);
+        const originalProvider = providers.find(p => p.id === currentConfig?.provider);
+        if (currentConfig && currentConfig.name === originalProvider?.name) {
+          setConfigName(provider.name);
+        }
+      } else {
+        // 新建模式直接使用厂商名称
+        setConfigName(provider.name);
+      }
     }
   };
 
@@ -1009,6 +1054,12 @@ function SettingsView() {
 
     if (configName.length > 30) {
       showToast('配置名称不能超过30个字符', 'error');
+      return;
+    }
+
+    // 检查配置名称是否重复（排除自身）
+    if (isConfigNameExists(configName, editingProvider || undefined)) {
+      showToast('配置名称已存在，请使用其他名称', 'error');
       return;
     }
 
@@ -1223,7 +1274,7 @@ function SettingsView() {
                 </div>
               </div>
 
-              {/* 模型配置列表 - 类似CC Switch */}
+              {/* 模型配置列表 */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 {modelConfigs.map((config, index) => {
                   const provider = providers.find(p => p.id === config.provider);
@@ -1284,7 +1335,7 @@ function SettingsView() {
                       {/* 模型信息 */}
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                          <span style={{ fontSize: '14px', fontWeight: 500 }}>{config.name}</span>
+                          <span style={{ fontSize: '14px', fontWeight: 500, color: '#374151' }}>{config.name}</span>
                           <span style={{
                             padding: '2px 8px',
                             background: provider?.color || '#6B7280',
@@ -1295,14 +1346,16 @@ function SettingsView() {
                             {provider?.name}
                           </span>
                         </div>
-                        <div style={{ fontSize: '12px', color: '#9CA3AF' }}>
-                          {config.model}
-                        </div>
-                        {config.remark && (
-                          <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '2px', fontStyle: 'italic' }}>
-                            {config.remark}
+                        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                          <div style={{ fontSize: '12px', color: '#374151', fontWeight: 500 }}>
+                            {config.model}
                           </div>
-                        )}
+                          {config.remark && (
+                            <div style={{ fontSize: '11px', color: '#9CA3AF', fontStyle: 'italic' }}>
+                              — {config.remark}
+                            </div>
+                          )}
+                        </div>
                       </div>
 
                       {/* 测速结果 */}
@@ -1441,8 +1494,22 @@ function SettingsView() {
                       minHeight: '78px'
                     }}
                   >
-                    <div style={{ width: '26px', height: '26px', borderRadius: '6px', background: provider.color, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 4px' }}>
-                      <i className={`fa-solid ${provider.icon}`} style={{ color: 'white', fontSize: '11px' }}></i>
+                    <div style={{ width: '34px', height: '34px', borderRadius: '8px', background: '#F3F4F6', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 4px', padding: '6px', boxSizing: 'border-box' }}>
+                      <img
+                        src={getProviderIconUrl(provider.id)}
+                        alt={provider.name}
+                        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        onError={(e) => {
+                          const target = e.target as HTMLImageElement;
+                          target.style.display = 'none';
+                          // 只在没有添加过回退图标时才添加
+                          if (!target.parentElement?.querySelector('.icon-fallback')) {
+                            target.insertAdjacentHTML('afterend',
+                              `<i class="fa-solid ${provider.icon} icon-fallback" style="color: #9CA3AF; font-size: 12px;"></i>`
+                            );
+                          }
+                        }}
+                      />
                     </div>
                     <span style={{ fontSize: '11px', fontWeight: 500 }}>{provider.name}</span>
                     <div style={{ height: '14px', marginTop: '2px' }}>
@@ -1450,6 +1517,7 @@ function SettingsView() {
                         <i className="fa-solid fa-check-circle" style={{ color: provider.color, fontSize: '10px' }}></i>
                       )}
                     </div>
+
                   </div>
                 ))}
               </div>
