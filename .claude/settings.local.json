@@ -5,7 +5,8 @@
       "Bash(npx electron-builder --win --dir)",
       "Bash(dir:*)",
       "Bash(tsc:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm install:*)"
     ]
   }
 }

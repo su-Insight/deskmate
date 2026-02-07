@@ -1,4 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import remarkGfm from 'remark-gfm';
 
 const iconModules = import.meta.glob('../../public/icons/*.svg', { eager: true, as: 'url' });
 
@@ -18,7 +22,7 @@ function getProviderIconUrl(providerId: string | undefined): string {
 // 扩展 Window 接口以支持 deskmate
 declare global {
   interface Window {
-    deskmate: {
+    deskmate?: {
       version: string;
       platform: string;
       fs: {
@@ -67,8 +71,19 @@ declare global {
   }
 }
 
+// 集中式 API 地址构建函数
+// 在 EXE 环境中，Vite 代理无效，需要直接使用完整 URL
+function getServerUrl(path: string): string {
+  // 如果是 Electron 环境，使用完整服务器地址
+  if (typeof window !== 'undefined' && (window as any).deskmate) {
+    return `http://127.0.0.1:5000${path}`;
+  }
+  // 开发环境使用相对路径（通过 Vite 代理）
+  return path;
+}
+
 interface Message {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
 }
 
@@ -361,9 +376,15 @@ function DashboardView() {
           <p className="page-subtitle">Good morning, welcome back!</p>
         </div>
         <div className="header-actions">
-          <button className="icon-btn">
-            <i className="fa-solid fa-search"></i>
-          </button>
+          <a href="https://github.com/yourusername" target="_blank" rel="noopener noreferrer" className="icon-btn" title="GitHub" style={{ marginRight: '8px' }}>
+            <i className="fa-brands fa-github"></i>
+          </a>
+          <a href="https://your-blog.com" target="_blank" rel="noopener noreferrer" className="icon-btn" title="Blog" style={{ marginRight: '8px' }}>
+            <i className="fa-solid fa-globe"></i>
+          </a>
+          <a href="https://www.buymeacoffee.com/yourusername" target="_blank" rel="noopener noreferrer" className="icon-btn" style={{ color: '#FF6A00', marginRight: '16px' }} title="Buy Me a Coffee">
+            <i className="fa-solid fa-mug-hot"></i>
+          </a>
           <button className="icon-btn" style={{ position: 'relative' }}>
             <i className="fa-solid fa-bell"></i>
             <span className="badge">3</span>
@@ -637,9 +658,20 @@ function AIChatView({ messages, inputMessage, isTyping, onInputChange, onSend, o
           <h1 className="page-title">AI Assistant</h1>
           <p className="page-subtitle">Your intelligent workspace companion</p>
         </div>
-        <button className="task-tag todo">
-          <i className="fa-solid fa-wand-magic-sparkles mr-2"></i>New Chat
-        </button>
+        <div className="header-actions">
+          <a href="https://github.com/su-Insight" target="_blank" rel="noopener noreferrer" className="icon-btn" title="GitHub">
+            <i className="fa-brands fa-github"></i>
+          </a>
+          <a href="https://your-blog.com" target="_blank" rel="noopener noreferrer" className="icon-btn" title="Blog">
+            <i className="fa-solid fa-globe"></i>
+          </a>
+          <a href="https://www.buymeacoffee.com/yourusername" target="_blank" rel="noopener noreferrer" className="icon-btn" style={{ color: '#FF6A00' }} title="Buy Me a Coffee">
+            <i className="fa-solid fa-mug-hot"></i>
+          </a>
+          <button className="task-tag todo" style={{ marginLeft: '8px' }}>
+            <i className="fa-solid fa-wand-magic-sparkles mr-2"></i>New Chat
+          </button>
+        </div>
       </header>
       <div className="card" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <div style={{ flex: 1, overflow: 'auto', padding: '20px' }}>
@@ -707,7 +739,7 @@ function AIChatView({ messages, inputMessage, isTyping, onInputChange, onSend, o
 function SettingsView() {
   const [activeTab, setActiveTab] = useState('provider-hub');
   const [showApiConfig, setShowApiConfig] = useState(false); // 控制API配置内容显示
-  const [selectedProvider, setSelectedProvider] = useState('openai');
+  const [selectedProvider, setSelectedProvider] = useState('deepseek'); // 默认选中第一个厂商
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
@@ -725,8 +757,18 @@ function SettingsView() {
   const [configRemark, setConfigRemark] = useState('');
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
   const [historyContext, setHistoryContext] = useState(true);
-  const [speedTestResults, setSpeedTestResults] = useState<Record<string, { time: string; color: string }>>({});
+  const [speedTestResults, setSpeedTestResults] = useState<Record<string, SpeedTestResult>>({});
   const [speedTesting, setSpeedTesting] = useState<Set<string>>(new Set());
+  const [showApiKeyPassword, setShowApiKeyPassword] = useState(false);
+
+  // 测速结果类型
+  type SpeedTestResult = {
+    time: string;
+    color: string;
+    isError?: boolean;
+    detail?: string;
+    rawError?: string;
+  };
 
   // 动态获取 deskmate API
   const getDeskmateApi = () => {
@@ -774,6 +816,7 @@ function SettingsView() {
       qwen: 'https://help.aliyun.com/zh/model-studio/get-api-key',
       hunyuan: 'https://console.cloud.tencent.com/hunyuan/api-key',
       minimax: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+      doubao: 'https://www.volcengine.com/docs/82379/1099522',
       baichuan: 'https://platform.baichuan-ai.com/docs/api',
       wenxin: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
 
@@ -799,6 +842,7 @@ function SettingsView() {
     { id: 'qwen', name: 'Qwen', icon: 'fa-brain', color: '#615ced', models: [], defaultUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen3-max', websiteUrl: 'https://tongyi.aliyun.com/' },
     { id: 'hunyuan', name: 'Hunyuan', icon: 'fa-brain', color: '#0052d9', models: [], defaultUrl: 'https://api.hunyuan.cloud.tencent.com/v1', defaultModel: 'hunyuan-T1', websiteUrl: 'https://hunyuan.tencent.com/' },
     { id: 'minimax', name: 'MiniMax', icon: 'fa-microchip', color: '#6535d2', models: [], defaultUrl: 'https://api.minimaxi.com/v1', defaultModel: 'MiniMax-M2.1', websiteUrl: 'https://www.minimaxi.com' },
+    { id: 'doubao', name: 'Doubao', icon: 'fa-microchip', color: '#bbb581', models: [], defaultUrl: 'https://ark.cn-beijing.volces.com/api/v3', defaultModel: 'doubao-seed-1-6-251015', websiteUrl: 'https://www.volcengine.com/' },
     { id: 'baichuan', name: 'Baichuan', icon: 'fa-microchip', color: '#ff5a00', models: [], defaultUrl: 'https://api.baichuan-ai.com/v1/', defaultModel: 'Baichuan-M3-Plus', websiteUrl: 'https://www.baichuan-ai.com/home' },
     { id: 'wenxin', name: 'Wenxin', icon: 'fa-microchip', color: '#2a69ff', models: [], defaultUrl: 'https://qianfan.baidubce.com/v2', defaultModel: 'ernie-4.5-turbo', websiteUrl: 'https://cloud.baidu.com/' },
 
@@ -846,34 +890,76 @@ function SettingsView() {
 
   // 测速功能
   const handleSpeedTest = async (configId: string) => {
+    const config = modelConfigs.find(c => c.id === configId);
+    if (!config) return;
+
+    // 查找 provider（用于错误时显示名称）
+    const provider = providers.find(p => p.id === config.provider);
+
     setSpeedTesting(prev => new Set(prev).add(configId));
-    // 模拟测速
-    await new Promise(resolve => setTimeout(resolve, 1500 + Math.random() * 1000));
 
-    // 模拟结果：80%成功，20%失败
-    const isSuccess = Math.random() > 0.2;
+    try {
 
-    if (isSuccess) {
-      const times = ['<50ms', '120ms', '89ms', '210ms', '67ms', '340ms', '95ms', '156ms'];
-      const colors = ['#10B981', '#10B981', '#10B981', '#F59E0B', '#10B981', '#F59E0B', '#10B981', '#F59E0B'];
-      const randomIndex = Math.floor(Math.random() * times.length);
+      const response = await fetch(getServerUrl('/api/ai/check'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: config.apiKey,
+          base_url: config.baseUrl,
+          model: config.model
+        })
+      });
+      const result = await response.json();
+
+      if (result.valid) {
+        setSpeedTestResults(prev => ({
+          ...prev,
+          [configId]: {
+            time: `${result.latency_ms}ms`,
+            color: result.latency_ms < 1000 ? '#10B981' : result.latency_ms < 2000 ? '#F59E0B' : '#EF4444',
+            isError: false,
+            detail: result.info || ''
+          }
+        }));
+      } else {
+        let errorText = '连接失败';
+        let detailText = result.raw_error_text;
+        if (result.http_status === 401) {
+          errorText = '401 认证失败';
+        } else if (result.http_status === 404) {
+          errorText = '404 地址错误';
+        } else if (result.http_status === 429) {
+          errorText = '429 超出限制';
+        } else if (result.http_status === 500) {
+          errorText = '500 服务器错误';
+        } else if (result.http_status === 503) {
+          errorText = '503 服务不可用';
+        } else if (result.http_status === 504) {
+          errorText = '504 连接超时';
+        }
+
+        setSpeedTestResults(prev => ({
+          ...prev,
+          [configId]: {
+            time: errorText,
+            color: '#EF4444',
+            isError: true,
+            // detail: detailText,
+            rawError: `${errorText} [${provider?.name || config.name}] ${detailText} (${result.latency_ms}ms) HTTP ${result.http_status || 'N/A'}`
+          }
+        }));
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : '未知错误';
       setSpeedTestResults(prev => ({
         ...prev,
-        [configId]: { time: times[randomIndex], color: colors[randomIndex] }
-      }));
-    } else {
-      // 失败情况
-      const errors = [
-        { time: '连接失败', color: '#EF4444' },
-        { time: '401 Unauthorized', color: '#EF4444' },
-        { time: '404 Not Found', color: '#EF4444' },
-        { time: '500 Server Error', color: '#EF4444' },
-        { time: '超时', color: '#EF4444' },
-      ];
-      const randomError = errors[Math.floor(Math.random() * errors.length)];
-      setSpeedTestResults(prev => ({
-        ...prev,
-        [configId]: randomError
+        [configId]: {
+          time: '连接失败',
+          color: '#EF4444',
+          isError: true,
+          // detail: errorMsg,
+          rawError: `[${provider?.name || config.name}] 连接失败: ${errorMsg}`
+        }
       }));
     }
 
@@ -903,20 +989,47 @@ function SettingsView() {
 
   // 快速测试连通性
   const handleQuickTest = async () => {
+    // 验证必填字段
+    if (!configName.trim()) {
+      showToast('请先输入配置名称', 'error');
+      return;
+    }
     if (!apiKey.trim()) {
       showToast('请先输入 API Key', 'error');
       return;
     }
+    if (!modelName.trim()) {
+      showToast('请先输入模型名称', 'error');
+      return;
+    }
+    if (!baseUrl.trim()) {
+      showToast('请先输入 Base URL', 'error');
+      return;
+    }
 
     setSaveStatus('testing');
-    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
 
-    const success = Math.random() > 0.2; // 模拟80%成功率
-    if (success) {
-      showToast('连接成功', 'success');
-    } else {
-      showToast('连接失败，请检查 API Key 和网络', 'error');
+    try {
+      const response = await fetch(getServerUrl('/api/ai/check'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: apiKey,
+          base_url: baseUrl
+        })
+      });
+      const result = await response.json();
+
+      if (result.valid) {
+        showToast(`连接成功 (${result.latency_ms}ms)`, 'success');
+      } else {
+        let errorMsg = result.error || '连接失败';
+        showToast(errorMsg, 'error');
+      }
+    } catch (error) {
+      showToast('连接失败: ' + (error instanceof Error ? error.message : '未知错误'), 'error');
     }
+
     setTimeout(() => setSaveStatus('idle'), 2000);
   };
 
@@ -931,6 +1044,16 @@ function SettingsView() {
     }
     newConfigs[index].enabled = !newConfigs[index].enabled;
     setModelConfigs(newConfigs);
+
+    // 如果启用了某个配置，保存它用于聊天
+    if (newConfigs[index].enabled) {
+      const enabledConfig = newConfigs.find(c => c.enabled);
+      if (enabledConfig) {
+        localStorage.setItem('deskmate_chatConfig', JSON.stringify(enabledConfig));
+      }
+    } else {
+      localStorage.removeItem('deskmate_chatConfig');
+    }
   };
 
   // 选择厂商时自动填充默认配置
@@ -1002,10 +1125,11 @@ function SettingsView() {
     setConfigRemark('');
     setApiKey('');
     setThinkingModel('');
-    // 使用当前选中的 provider 默认值预填
-    const provider = providers.find(p => p.id === selectedProvider);
-    setBaseUrl(provider?.defaultUrl || '');
-    setModelName(provider?.defaultModel || '');
+    // 默认选中第一个厂商（DeepSeek）并填充默认值
+    const firstProvider = providers[0];
+    setSelectedProvider(firstProvider.id);
+    setBaseUrl(firstProvider.defaultUrl || '');
+    setModelName(firstProvider.defaultModel || '');
     setTemperature(0.7);
     setTopP(0.9);
     setMaxTokens(4096);
@@ -1119,6 +1243,16 @@ function SettingsView() {
             ? { ...c, name: configName, remark: configRemark, provider: selectedProvider, model: modelName, baseUrl: baseUrl, thinkingModel: thinkingModel, apiKey: apiKey }
             : c
         ));
+        // 更新 localStorage（如果是编辑已启用的配置）
+        const updatedConfigs = modelConfigs.map(c =>
+          c.id === editingProvider
+            ? { ...c, name: configName, remark: configRemark, provider: selectedProvider, model: modelName, baseUrl: baseUrl, thinkingModel: thinkingModel, apiKey: apiKey }
+            : c
+        );
+        const savedConfig = updatedConfigs.find(c => c.id === editingProvider && c.enabled);
+        if (savedConfig) {
+          localStorage.setItem('deskmate_chatConfig', JSON.stringify(savedConfig));
+        }
       } else {
         const newConfig = {
           id: Date.now().toString(),
@@ -1130,9 +1264,14 @@ function SettingsView() {
           thinkingModel: thinkingModel,
           apiKey: apiKey,
           temperature: 0.7,
-          enabled: false
+          // 如果当前没有启用的配置，自动启用
+          enabled: !modelConfigs.some(c => c.enabled)
         };
         setModelConfigs(prev => [...prev, newConfig]);
+        // 自动启用时同步到 localStorage
+        if (newConfig.enabled) {
+          localStorage.setItem('deskmate_chatConfig', JSON.stringify(newConfig));
+        }
       }
 
       setSaveStatus('success');
@@ -1360,15 +1499,28 @@ function SettingsView() {
 
                       {/* 测速结果 */}
                       {speedResult && !isSpeedTesting && (
-                        <div style={{
-                          padding: '4px 10px',
-                          background: `${speedResult.color}15`,
-                          borderRadius: '6px',
-                          fontSize: '12px',
-                          fontWeight: 500,
-                          color: speedResult.color
-                        }}>
-                          <i className="fa-solid fa-bolt" style={{ marginRight: '4px' }}></i>
+                        <div
+                          onClick={() => {
+                            if (speedResult.isError && speedResult.rawError) {
+                              navigator.clipboard.writeText(speedResult.rawError);
+                              showToast('已复制到剪贴板', 'success');
+                            }
+                          }}
+                          style={{
+                            padding: '4px 10px',
+                            background: `${speedResult.color}15`,
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: 500,
+                            color: speedResult.color,
+                            cursor: speedResult.isError ? 'pointer' : 'default',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                          }}
+                          title={speedResult.isError ? '点击复制详细信息' : ''}
+                        >
+                          <i className="fa-solid fa-bolt"></i>
                           {speedResult.time}
                         </div>
                       )}
@@ -1596,20 +1748,39 @@ function SettingsView() {
                       </a>
                     )}
                   </label>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="sk-..."
-                    style={{
-                      width: '100%',
-                      padding: '10px 12px',
-                      border: '1px solid rgba(0,0,0,0.1)',
-                      borderRadius: '8px',
-                      fontSize: '13px',
-                      outline: 'none'
-                    }}
-                  />
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type={showApiKeyPassword ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="sk-..."
+                      style={{
+                        width: '100%',
+                        padding: '10px 40px 10px 12px',
+                        border: '1px solid rgba(0,0,0,0.1)',
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        outline: 'none'
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKeyPassword(!showApiKeyPassword)}
+                      style={{
+                        position: 'absolute',
+                        right: '12px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        background: 'none',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: '#9CA3AF',
+                        padding: '4px'
+                      }}
+                    >
+                      <i className={`fa-solid ${showApiKeyPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                    </button>
+                  </div>
                 </div>
 
                 {/* 模型名称 - 第二行 */}
@@ -1914,7 +2085,7 @@ function SettingsView() {
         </div>
       </div>
 
-      {/* Toast 提示 */}
+      {/* Toast 提示 - 支持点击复制 */}
       {toast && (
         <div style={{
           position: 'fixed',
@@ -1926,20 +2097,29 @@ function SettingsView() {
           pointerEvents: 'none',
           zIndex: 9999
         }}>
-          <div style={{
-            padding: '12px 20px',
-            background: toast.type === 'success' ? '#10B981' : '#EF4444',
-            color: 'white',
-            borderRadius: '8px',
-            fontSize: '13px',
-            fontWeight: 500,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            animation: 'fadeInOut 2s ease-in-out',
-            pointerEvents: 'auto'
-          }}>
+          <div
+            onClick={() => {
+              navigator.clipboard.writeText(toast.msg);
+              showToast('已复制到剪贴板', 'success');
+            }}
+            style={{
+              padding: '12px 20px',
+              background: toast.type === 'success' ? '#10B981' : '#EF4444',
+              color: 'white',
+              borderRadius: '8px',
+              fontSize: '13px',
+              fontWeight: 500,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              animation: 'fadeInOut 2s ease-in-out',
+              pointerEvents: 'auto',
+              cursor: toast.type === 'error' ? 'pointer' : 'default',
+              position: 'relative'
+            }}
+            title={toast.type === 'error' ? '点击复制错误信息' : ''}
+          >
             <i className={`fa-solid ${toast.type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'}`}></i>
             {toast.msg}
           </div>
@@ -1954,6 +2134,7 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isConfigMissing, setIsConfigMissing] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false); // 追踪是否正在流式输出
   const api = (window as any).deskmate;
 
   // 解析结构化错误信息
@@ -1969,52 +2150,160 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
     return { isError: false, shortMsg: '', detailMsg: '' };
   };
 
+  // 获取当前聊天的 API 配置
+  const getChatConfig = () => {
+    try {
+      const saved = localStorage.getItem('deskmate_chatConfig');
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error('Failed to parse chat config:', e);
+    }
+    return null;
+  };
+
   const handleSend = async () => {
     if (!inputMessage.trim() || isTyping) return;
+
+    // 检查是否配置了 API
+    const chatConfig = getChatConfig();
+    if (!chatConfig || !chatConfig.apiKey) {
+      setLocalMessages(prev => [...prev, {
+        role: 'assistant',
+        content: '__ERROR__|未配置 AI|请先在设置中配置 API Key'
+      }]);
+      return;
+    }
 
     const userMsg: Message = { role: 'user', content: inputMessage };
     setLocalMessages(prev => [...prev, userMsg]);
     setInputMessage('');
     setIsTyping(true);
+    setIsStreaming(true);
 
     try {
-      // 检查 API 是否可用
-      if (!api?.ai?.chat) {
-        throw new Error('API not available');
+      // 构建历史消息（排除系统消息）
+      const history = localMessages
+        .filter((m: Message) => m.role !== 'system')
+        .map(m => ({ role: m.role, content: m.content }));
+
+      // 使用流式接口，携带 API 配置
+      const response = await fetch(getServerUrl('/api/ai/chat/stream'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: inputMessage,
+          history: history,
+          mode: 'private',
+          api_key: chatConfig.apiKey,
+          base_url: chatConfig.baseUrl,
+          model_name: chatConfig.model
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
       }
 
-      const response = await api.ai.chat(inputMessage, localMessages);
-      console.log('AI Response:', response);
-
-      if (response?.success) {
-        // 检查是否是结构化错误
-        const errorInfo = parseError(response.response || '');
-        if (errorInfo.isError) {
-          setLocalMessages(prev => [...prev, {
-            role: 'assistant',
-            content: `__ERROR__|${errorInfo.shortMsg}|${errorInfo.detailMsg}`
-          }]);
-        } else {
-          setLocalMessages(prev => [...prev, { role: 'assistant', content: response.response || '' }]);
-        }
-        // 检查是否需要配置API Key
-        if (response.response?.includes('MINIMAX_API_KEY') || response.response?.includes('API密钥')) {
-          setIsConfigMissing(true);
-        }
-      } else {
-        // API 调用失败，显示错误信息
-        const errorMsg = response?.response || '抱歉，发生了错误，请稍后重试。';
-        const errorInfo = parseError(errorMsg);
-        setLocalMessages(prev => [...prev, {
-          role: 'assistant',
-          content: errorInfo.isError ? `__ERROR__|${errorInfo.shortMsg}|${errorInfo.detailMsg}` : errorMsg
-        }]);
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Response body is not readable');
       }
+
+      const decoder = new TextDecoder();
+      let assistantReply = '';
+      let messageId = '';
+
+      // 添加一个空的消息气泡用于流式更新
+      setLocalMessages(prev => [...prev, {
+        role: 'assistant',
+        content: ''
+      }]);
+      setIsTyping(false); // 已有消息气泡，隐藏打字指示器
+
+      // 使用 ref 来追踪当前显示的内容，避免不必要的重新渲染
+      const messageIndex = localMessages.length; // 即将添加的消息索引
+
+      // 读取流
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+            if (dataStr === '[DONE]') break;
+
+            try {
+              const data = JSON.parse(dataStr);
+
+              // 处理错误
+              if (data.error) {
+                const parts = data.error.split('|');
+                const shortMsg = parts[0] || '未知错误';
+                const detailMsg = parts.slice(1).join('|') || '';
+                setLocalMessages(prev => {
+                  const newMsgs = [...prev];
+                  if (newMsgs.length > 0) {
+                    newMsgs[newMsgs.length - 1] = {
+                      role: 'assistant',
+                      content: `__ERROR__|${shortMsg}|${detailMsg}`
+                    };
+                  }
+                  return newMsgs;
+                });
+                setIsStreaming(false);
+                return;
+              }
+
+              // 更新消息内容
+              if (data.content !== undefined) {
+                assistantReply += data.content;
+                messageId = data.message_id || messageId;
+
+                // 直接更新最后一条消息的内容（打字机效果）
+                setLocalMessages(prev => {
+                  const newMsgs = [...prev];
+                  if (newMsgs.length > 0) {
+                    newMsgs[newMsgs.length - 1] = {
+                      role: 'assistant',
+                      content: assistantReply
+                    };
+                  }
+                  return newMsgs;
+                });
+              }
+
+              // 流结束
+              if (data.done) {
+                setIsStreaming(false);
+                console.log('Streaming completed, message_id:', messageId);
+              }
+            } catch (e) {
+              // 忽略解析错误
+            }
+          }
+        }
+      }
+
+      // 检查是否需要配置API Key
+      if (assistantReply.includes('MINIMAX_API_KEY') || assistantReply.includes('API密钥')) {
+        setIsConfigMissing(true);
+      }
+
     } catch (error) {
       console.error('Chat error:', error);
-      setLocalMessages(prev => [...prev, { role: 'assistant', content: '__ERROR__|连接失败|无法连接到AI服务' }]);
+      setLocalMessages(prev => [...prev, {
+        role: 'assistant',
+        content: '__ERROR__|连接失败|无法连接到AI服务'
+      }]);
     } finally {
       setIsTyping(false);
+      setIsStreaming(false);
     }
   };
 
@@ -2025,9 +2314,181 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
     }
   };
 
+  // 使用 react-markdown 渲染消息内容（支持完整的 Markdown 语法）
+  const renderMessageContent = (content: string) => {
+    // 处理错误消息
+    if (content.startsWith('__ERROR__|')) {
+      return renderErrorBubble(content);
+    }
+
+    // 代码块复制按钮组件
+    const CodeBlockHeader = ({ language, code }: { language: string; code: string }) => {
+      const [copied, setCopied] = useState(false);
+
+      const handleCopy = async () => {
+        await navigator.clipboard.writeText(code);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      };
+
+      return (
+        <div style={{
+          background: '#2d2d2d',
+          padding: '4px 12px',
+          fontSize: '11px',
+          color: '#888',
+          textTransform: 'uppercase',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <span>{language}</span>
+          <button
+            onClick={handleCopy}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: copied ? '#4ade80' : '#888',
+              cursor: 'pointer',
+              fontSize: '11px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              transition: 'color 0.2s',
+            }}
+          >
+            <i className={copied ? 'fa-solid fa-check' : 'fa-regular fa-copy'}></i>
+            {copied ? '已复制' : '复制'}
+          </button>
+        </div>
+      );
+    };
+
+    return (
+      <ReactMarkdown
+        className="markdown-content"
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code({ node, inline, className, children, ...props }: any) {
+            const match = /language-(\w+)/.exec(className || '');
+            const language = match ? match[1] : '';
+            const codeContent = String(children).replace(/\n$/, '');
+
+            if (!inline && language) {
+              return (
+                <div style={{
+                  background: '#1e1e1e',
+                  borderRadius: '8px',
+                  margin: '8px 0',
+                  overflow: 'hidden',
+                }}>
+                  <CodeBlockHeader language={language} code={codeContent} />
+                  <div style={{
+                    maxHeight: '300px',
+                    overflow: 'auto',
+                    overflowX: 'auto',
+                    background: '#1e1e1e',
+                  }} className="code-scroll">
+                    <SyntaxHighlighter
+                      style={vscDarkPlus}
+                      language={language}
+                      PreTag="div"
+                      customStyle={{
+                        margin: 0,
+                        padding: '12px',
+                        fontSize: '13px',
+                        background: 'transparent',
+                      }}
+                      {...props}
+                    >
+                      {codeContent}
+                    </SyntaxHighlighter>
+                  </div>
+                </div>
+              );
+            }
+
+            // 行内代码
+            return (
+              <code
+                style={{
+                  background: 'rgba(99, 102, 241, 0.1)',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  fontSize: '0.9em',
+                  color: '#6366f1',
+                  fontFamily: 'monospace',
+                }}
+                className={className}
+                {...props}
+              >
+                {children}
+              </code>
+            );
+          },
+          pre({ children }: any) {
+            return <>{children}</>;
+          },
+          p({ children }: any) {
+            return <p style={{ margin: '8px 0', lineHeight: 1.6 }}>{children}</p>;
+          },
+          ul({ children }: any) {
+            return <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>{children}</ul>;
+          },
+          ol({ children }: any) {
+            return <ol style={{ margin: '8px 0', paddingLeft: '20px' }}>{children}</ol>;
+          },
+          li({ children }: any) {
+            return <li style={{ margin: '4px 0', lineHeight: 1.5 }}>{children}</li>;
+          },
+          blockquote({ children }: any) {
+            return (
+              <blockquote style={{
+                borderLeft: '4px solid #6366f1',
+                margin: '8px 0',
+                paddingLeft: '12px',
+                color: '#6b7280',
+                background: 'rgba(99, 102, 241, 0.05)',
+                borderRadius: '0 4px 4px 0',
+              }}>
+                {children}
+              </blockquote>
+            );
+          },
+          h1({ children }: any) {
+            return <h1 style={{ fontSize: '1.5em', margin: '12px 0 8px', fontWeight: 600 }}>{children}</h1>;
+          },
+          h2({ children }: any) {
+            return <h2 style={{ fontSize: '1.3em', margin: '10px 0 6px', fontWeight: 600 }}>{children}</h2>;
+          },
+          h3({ children }: any) {
+            return <h3 style={{ fontSize: '1.1em', margin: '8px 0 4px', fontWeight: 600 }}>{children}</h3>;
+          },
+          a({ children, href }: any) {
+            return (
+              <a
+                href={href}
+                style={{ color: '#6366f1', textDecoration: 'underline' }}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {children}
+              </a>
+            );
+          },
+          hr() {
+            return <hr style={{ border: 'none', borderTop: '1px solid #e5e7eb', margin: '12px 0' }} />;
+          },
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    );
+  };
+
   const allMessages = messages.length > 0 ? messages : localMessages;
 
-  // 渲染错误消息气泡（简洁版：标题+小字）
+  // 渲染错误消息气泡
   const renderErrorBubble = (content: string) => {
     const errorInfo = parseError(content);
     if (!errorInfo.isError) return content;
@@ -2094,10 +2555,10 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#D97706', fontSize: '12px' }}>
               <i className="fa-solid fa-exclamation-triangle"></i>
-              <span>请配置 Minimax API Key</span>
+              <span>请配置 API Key</span>
             </div>
             <div style={{ fontSize: '11px', color: '#92400E', marginTop: '4px', marginLeft: '22px' }}>
-              点击右上角 <i className="fa-solid fa-cog"></i> 齿轮图标进行配置
+              点击右上角 <i className="fa-solid fa-cog"></i> 进行配置
             </div>
           </div>
         )}
@@ -2121,12 +2582,16 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
                   <i className={`fa-solid ${msg.role === 'user' ? 'fa-user' : 'fa-robot'}`} style={{ fontSize: '11px' }}></i>
                 </div>
                 <div className={`chat-bubble ${msg.role === 'user' ? 'mine' : 'other'}`}>
-                  {msg.role === 'assistant' && (msg.content.startsWith('__ERROR__|') ? (
-                    renderErrorBubble(msg.content)
+                  {msg.role === 'assistant' ? (
+                    // 流式过程中显示纯文本（打字机效果），流结束后渲染 Markdown
+                    isStreaming && i === allMessages.length - 1 ? (
+                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{msg.content}</div>
+                    ) : (
+                      renderMessageContent(msg.content)
+                    )
                   ) : (
-                    msg.content
-                  ))}
-                  {msg.role === 'user' && msg.content}
+                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{msg.content}</div>
+                  )}
                 </div>
               </div>
             ))

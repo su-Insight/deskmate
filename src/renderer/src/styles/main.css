@@ -44,7 +44,7 @@
 html, body {
   font-size: 14px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: var(--canvas-bg);
+  background: linear-gradient(145deg, #f0f2f5 0%, #e8ecf1 50%, #e2e6ed 100%);
   color: var(--text-primary);
   height: 100vh;
   overflow: hidden;
@@ -62,8 +62,10 @@ html, body {
 /* Sidebar */
 .sidebar {
   width: 64px;
-  background: var(--surface-white);
-  border-right: 1px solid rgba(0,0,0,0.06);
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-right: 1px solid rgba(255, 255, 255, 0.3);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -152,6 +154,13 @@ html, body {
   flex: 1;
   overflow: auto;
   padding: 20px 24px;
+  background: linear-gradient(135deg,
+    rgba(250, 251, 252, 0.8) 0%,
+    rgba(245, 247, 250, 0.9) 50%,
+    rgba(240, 242, 248, 0.8) 100%
+  );
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
 }
 
 /* Header */
@@ -160,6 +169,13 @@ html, body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 20px;
+  padding-bottom: 16px;
+  background: rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+  margin: -20px -24px 20px -24px;
+  padding: 16px 24px;
 }
 
 .page-title {
@@ -183,15 +199,17 @@ html, body {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: var(--surface-white);
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
   cursor: pointer;
-  box-shadow: var(--shadow-soft);
+  box-shadow: 0 2px 8px rgba(31, 38, 135, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.3);
   transition: all 0.2s ease;
-  border: none;
 }
 
 .icon-btn:hover {
@@ -214,18 +232,29 @@ html, body {
   justify-content: center;
 }
 
+/* Glass Effect - 玻璃磨砂效果 */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.65);
+  --glass-border: rgba(255, 255, 255, 0.4);
+  --glass-shadow: 0 8px 32px rgba(31, 38, 135, 0.08);
+}
+
 /* Cards */
 .card {
-  background: var(--surface-white);
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-card);
-  box-shadow: var(--shadow-soft);
+  box-shadow: var(--glass-shadow);
   overflow: hidden;
   transition: all 0.25s ease;
 }
 
 .card:hover {
-  box-shadow: var(--shadow-hover);
-  transform: translateY(-1px);
+  box-shadow: 0 12px 40px rgba(31, 38, 135, 0.12);
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.6);
 }
 
 /* Stats Grid */
@@ -526,8 +555,10 @@ html, body {
 /* Right Panel */
 .right-panel {
   width: 340px;
-  background: var(--surface-white);
-  border-left: 1px solid rgba(0,0,0,0.06);
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -535,7 +566,10 @@ html, body {
 
 .panel-header {
   padding: 16px 20px;
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+  background: rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -568,7 +602,10 @@ html, body {
 /* Schedule */
 .schedule-section {
   padding: 16px 20px;
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+  background: rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .schedule-title {
@@ -592,14 +629,20 @@ html, body {
   border-radius: 12px;
   cursor: pointer;
   transition: all 0.2s ease;
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .schedule-item:hover {
-  background: rgba(0,0,0,0.02);
+  background: rgba(255, 255, 255, 0.7);
+  transform: translateX(2px);
 }
 
 .schedule-item.active {
-  background: rgba(157, 80, 187, 0.06);
+  background: rgba(157, 80, 187, 0.1);
+  border-color: rgba(157, 80, 187, 0.2);
 }
 
 .schedule-icon {
@@ -672,84 +715,79 @@ html, body {
   font-size: 13px;
 }
 
-/* Chat Message */
+/* Chat Message - 简洁的 flex 布局 */
 .chat-message {
   display: flex;
-  flex-direction: column;
-  margin-bottom: 16px;
-  position: relative;
-}
-
-.chat-message:not(.user) {
+  margin: 30px 0;
   align-items: flex-start;
 }
 
-.chat-message.user {
-  align-items: flex-end;
+.chat-message:first-of-type {
+  margin-top: -5px;
 }
 
-/* 头像 - 独立于气泡 */
+.chat-message:last-of-type {
+  padding-bottom: 10px;
+}
+
+.chat-message:not(.user) {
+  flex-direction: row;
+}
+
+.chat-message.user {
+  flex-direction: row-reverse;
+}
+
+/* 头像 */
 .chat-avatar {
-  position: absolute;
-  bottom: 0;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   color: white;
-  font-size: 11px;
+  font-size: 12px;
   box-shadow: var(--shadow-soft);
-  z-index: 1;
-}
-
-.chat-message:not(.user) .chat-avatar {
-  left: 0;
-}
-
-.chat-message.user .chat-avatar {
-  right: 0px;
-  top: 13px;
+  flex-shrink: 0;
+  margin-bottom: -16px;
+  align-self: flex-end;
 }
 
 /* 气泡 */
 .chat-bubble {
-  position: relative;
+  max-width: 75%;
   padding: 10px 14px;
   border-radius: 14px;
   font-size: 13px;
   line-height: 1.5;
-  max-width: 70%;
+  position: relative;
 }
 
-/* AI气泡向右偏移 */
 .chat-message:not(.user) .chat-bubble {
-  margin-left: 20px;
-}
-
-/* 用户气泡向左偏移 */
-.chat-message.user .chat-bubble {
-  margin-right: 35px;
-  margin-top: -5px;
-}
-
-.chat-bubble.other {
-  background: var(--surface-white);
-  box-shadow: var(--shadow-soft);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 2px 8px rgba(31, 38, 135, 0.06);
   border-bottom-left-radius: 4px;
+  margin-left: 10px;
 }
 
-.chat-bubble.mine {
+.chat-message.user .chat-bubble {
   background: linear-gradient(135deg, var(--secondary-light), var(--secondary-dark));
   color: white;
   border-bottom-right-radius: 4px;
+  margin-right: 10px;
 }
 
 /* Chat Input */
 .chat-input-area {
   padding: 12px 20px;
-  border-top: 1px solid rgba(0,0,0,0.06);
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .chat-input-row {
@@ -761,11 +799,14 @@ html, body {
 .chat-input {
   flex: 1;
   padding: 10px 14px;
-  border: none;
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 14px;
-  background: var(--canvas-bg);
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   font-size: 13px;
   outline: none;
+  transition: all 0.2s ease;
 }
 
 .chat-input:focus {
@@ -896,4 +937,53 @@ html, body {
 /* Right Panel Cursor */
 .right-panel {
   cursor: default;
+}
+
+/* Code Block Scrollbar - Lighter color for both vertical and horizontal */
+.code-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #666 #1e1e1e;
+}
+
+.code-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.code-scroll::-webkit-scrollbar-track {
+  background: #1e1e1e;
+  border-radius: 3px;
+}
+
+.code-scroll::-webkit-scrollbar-thumb {
+  background: #666;
+  border-radius: 3px;
+}
+
+.code-scroll::-webkit-scrollbar-thumb:hover {
+  background: #888;
+}
+
+.code-scroll::-webkit-scrollbar-corner {
+  background: #1e1e1e;
+}
+
+/* Firefox scrollbar */
+.code-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #666 #1e1e1e;
+}
+
+/* Markdown Content */
+.markdown-content {
+  word-break: break-word;
+}
+
+.markdown-content pre {
+  background: transparent;
+  margin: 8px 0;
+}
+
+.markdown-content code {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
 }
