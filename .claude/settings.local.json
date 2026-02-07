@@ -6,7 +6,8 @@
       "Bash(dir:*)",
       "Bash(tsc:*)",
       "Bash(npx tsc:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(powershell -Command:*)"
     ]
   }
 }

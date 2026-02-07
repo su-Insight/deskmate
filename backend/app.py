@@ -215,7 +215,7 @@ def ai_chat_stream():
     # 优先使用请求中的配置，其次使用数据库配置
     api_key = data.get('api_key', '').strip() or get_ai_config().get('api_key', '')
     base_url = data.get('base_url', '').strip() or get_ai_config().get('base_url', '')
-    model_name = data.get('model_name', '').strip() or get_ai_config().get('model_name', 'gpt-4o')
+    model_name = data.get('model_name', '').strip() or get_ai_config().get('model_name', '')
 
     if not user_msg:
         return jsonify({'error': '内容不能为空'}), 400

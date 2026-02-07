@@ -102,6 +102,7 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [rightPanelWidth, setRightPanelWidth] = useState(340);
   const [isRightPanelCollapsed, setIsRightPanelCollapsed] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -376,7 +377,7 @@ function DashboardView() {
           <p className="page-subtitle">Good morning, welcome back!</p>
         </div>
         <div className="header-actions">
-          <a href="https://github.com/yourusername" target="_blank" rel="noopener noreferrer" className="icon-btn" title="GitHub" style={{ marginRight: '8px' }}>
+          <a href="https://github.com/su-Insight" target="_blank" rel="noopener noreferrer" className="icon-btn" title="GitHub" style={{ marginRight: '8px' }}>
             <i className="fa-brands fa-github"></i>
           </a>
           <a href="https://your-blog.com" target="_blank" rel="noopener noreferrer" className="icon-btn" title="Blog" style={{ marginRight: '8px' }}>
@@ -2134,8 +2135,16 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isConfigMissing, setIsConfigMissing] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false); // 追踪是否正在流式输出
+  const [isStreaming, setIsStreaming] = useState(false);
+  // 打字机效果：追踪已显示的字符数，-1 表示显示完整内容
+  const [typewriterIndex, setTypewriterIndex] = useState<number>(-1);
   const api = (window as any).deskmate;
+
+  // 流式响应控制 refs
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const streamReaderRef = useRef<any>(null);
+  const typeWriterTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null); // 用于真正"挂断电话"
 
   // 解析结构化错误信息
   const parseError = (response: string): { isError: boolean; shortMsg: string; detailMsg: string } => {
@@ -2182,13 +2191,19 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
     setIsTyping(true);
     setIsStreaming(true);
 
+    // 用于存储 AI 回复，声明在 try-catch 外以便 catch 访问
+    let assistantReply = '';
+
     try {
+      // 创建 AbortController 用于"挂断电话"
+      abortControllerRef.current = new AbortController();
+
       // 构建历史消息（排除系统消息）
       const history = localMessages
         .filter((m: Message) => m.role !== 'system')
         .map(m => ({ role: m.role, content: m.content }));
 
-      // 使用流式接口，携带 API 配置
+      // 使用流式接口，携带 API 配置和 signal
       const response = await fetch(getServerUrl('/api/ai/chat/stream'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2199,7 +2214,8 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
           api_key: chatConfig.apiKey,
           base_url: chatConfig.baseUrl,
           model_name: chatConfig.model
-        })
+        }),
+        signal: abortControllerRef.current.signal // 关键：绑定 abort signal
       });
 
       if (!response.ok) {
@@ -2211,9 +2227,12 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
         throw new Error('Response body is not readable');
       }
 
+      // 存储 reader 以便停止时使用
+      streamReaderRef.current = reader;
+
       const decoder = new TextDecoder();
-      let assistantReply = '';
       let messageId = '';
+      let displayIndex = 0; // 当前已显示的字符位置
 
       // 添加一个空的消息气泡用于流式更新
       setLocalMessages(prev => [...prev, {
@@ -2222,88 +2241,172 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
       }]);
       setIsTyping(false); // 已有消息气泡，隐藏打字指示器
 
-      // 使用 ref 来追踪当前显示的内容，避免不必要的重新渲染
-      const messageIndex = localMessages.length; // 即将添加的消息索引
+      // 打字机函数
+      const typeWriter = () => {
+        if (displayIndex < assistantReply.length) {
+          displayIndex++;
+          setTypewriterIndex(displayIndex);
+          setLocalMessages(prev => {
+            const newMsgs = [...prev];
+            if (newMsgs.length > 0) {
+              newMsgs[newMsgs.length - 1] = {
+                role: 'assistant',
+                content: assistantReply.substring(0, displayIndex)
+              };
+            }
+            return newMsgs;
+          });
+        } else if (typeWriterTimerRef.current) {
+          clearInterval(typeWriterTimerRef.current);
+          typeWriterTimerRef.current = null;
+        }
+      };
 
-      // 读取流
+      // 读取流并实时更新
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6);
-            if (dataStr === '[DONE]') break;
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const dataStr = line.slice(6);
 
-            try {
-              const data = JSON.parse(dataStr);
+              try {
+                if (dataStr === '[DONE]') break;
 
-              // 处理错误
-              if (data.error) {
-                const parts = data.error.split('|');
-                const shortMsg = parts[0] || '未知错误';
-                const detailMsg = parts.slice(1).join('|') || '';
-                setLocalMessages(prev => {
-                  const newMsgs = [...prev];
-                  if (newMsgs.length > 0) {
-                    newMsgs[newMsgs.length - 1] = {
-                      role: 'assistant',
-                      content: `__ERROR__|${shortMsg}|${detailMsg}`
-                    };
+                const data = JSON.parse(dataStr);
+
+                if (data.error) {
+                  if (typeWriterTimerRef.current) {
+                    clearInterval(typeWriterTimerRef.current);
+                    typeWriterTimerRef.current = null;
                   }
-                  return newMsgs;
-                });
-                setIsStreaming(false);
-                return;
-              }
+                  const parts = data.error.split('|');
+                  setLocalMessages(prev => {
+                    const newMsgs = [...prev];
+                    if (newMsgs.length > 0) {
+                      newMsgs[newMsgs.length - 1] = {
+                        role: 'assistant',
+                        content: `__ERROR__|${parts[0] || '错误'}|${parts.slice(1).join('|')}`
+                      };
+                    }
+                    return newMsgs;
+                  });
+                  setIsStreaming(false);
+                  setTypewriterIndex(-1);
+                  streamReaderRef.current = null;
+                  return;
+                }
 
-              // 更新消息内容
-              if (data.content !== undefined) {
-                assistantReply += data.content;
-                messageId = data.message_id || messageId;
+                if (data.content !== undefined) {
+                  assistantReply += data.content;
+                  messageId = data.message_id || messageId;
 
-                // 直接更新最后一条消息的内容（打字机效果）
-                setLocalMessages(prev => {
-                  const newMsgs = [...prev];
-                  if (newMsgs.length > 0) {
-                    newMsgs[newMsgs.length - 1] = {
-                      role: 'assistant',
-                      content: assistantReply
-                    };
+                  // 启动打字机定时器（极速模式：8ms）
+                  if (!typeWriterTimerRef.current) {
+                    displayIndex = 0;
+                    typeWriterTimerRef.current = setInterval(typeWriter, 8);
                   }
-                  return newMsgs;
-                });
-              }
+                }
 
-              // 流结束
-              if (data.done) {
-                setIsStreaming(false);
-                console.log('Streaming completed, message_id:', messageId);
-              }
-            } catch (e) {
-              // 忽略解析错误
+                if (data.done) {
+                  setIsStreaming(false);
+                  setTypewriterIndex(-1);
+                  if (typeWriterTimerRef.current) {
+                    clearInterval(typeWriterTimerRef.current);
+                    typeWriterTimerRef.current = null;
+                  }
+                  streamReaderRef.current = null;
+                  setLocalMessages(prev => {
+                    const newMsgs = [...prev];
+                    if (newMsgs.length > 0) {
+                      newMsgs[newMsgs.length - 1] = {
+                        role: 'assistant',
+                        content: assistantReply
+                      };
+                    }
+                    return newMsgs;
+                  });
+                }
+              } catch (e) {}
             }
           }
         }
-      }
 
       // 检查是否需要配置API Key
       if (assistantReply.includes('MINIMAX_API_KEY') || assistantReply.includes('API密钥')) {
         setIsConfigMissing(true);
       }
 
-    } catch (error) {
-      console.error('Chat error:', error);
-      setLocalMessages(prev => [...prev, {
-        role: 'assistant',
-        content: '__ERROR__|连接失败|无法连接到AI服务'
-      }]);
+    } catch (error: any) {
+      // 如果是被用户停止的
+      if (error.name === 'AbortError') {
+        if (assistantReply && assistantReply.trim().length > 0) {
+          // 有内容时：追加停止提示到已显示内容后面
+          const stoppedContent = assistantReply + '\n\n_（你已停止这条回答）_';
+          setLocalMessages(prev => {
+            const newMsgs = [...prev];
+            if (newMsgs.length > 0) {
+              newMsgs[newMsgs.length - 1] = {
+                role: 'assistant',
+                content: stoppedContent
+              };
+            }
+            return newMsgs;
+          });
+        } else {
+          // 无内容时：直接显示停止提示（移除空消息，添加带提示的新消息）
+          setLocalMessages(prev => {
+            const newMsgs = [...prev];
+            // 移除空消息
+            if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].content === '') {
+              newMsgs.pop();
+            }
+            // 添加停止提示
+            newMsgs.push({
+              role: 'assistant',
+              content: '_（你已停止这条回答）_'
+            });
+            return newMsgs;
+          });
+        }
+      } else {
+        console.error('Chat error:', error);
+        setLocalMessages(prev => [...prev, {
+          role: 'assistant',
+          content: '__ERROR__|连接失败|无法连接到AI服务'
+        }]);
+      }
     } finally {
       setIsTyping(false);
       setIsStreaming(false);
+      // 清理 refs
+      if (typeWriterTimerRef.current) {
+        clearInterval(typeWriterTimerRef.current);
+        typeWriterTimerRef.current = null;
+      }
+      streamReaderRef.current = null;
+      abortControllerRef.current = null;
+    }
+  };
+
+  // 停止流式响应
+  const handleStop = () => {
+    if (isStreaming) {
+      // 真正"挂断电话"
+      abortControllerRef.current?.abort();
+      // 清除打字机定时器
+      if (typeWriterTimerRef.current) {
+        clearInterval(typeWriterTimerRef.current);
+        typeWriterTimerRef.current = null;
+      }
+      // 更新状态
+      setIsStreaming(false);
+      setIsTyping(false);
+      streamReaderRef.current = null;
     }
   };
 
@@ -2486,7 +2589,8 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
     );
   };
 
-  const allMessages = messages.length > 0 ? messages : localMessages;
+  // 始终使用 localMessages（实际更新的消息列表）
+  const allMessages = localMessages;
 
   // 渲染错误消息气泡
   const renderErrorBubble = (content: string) => {
@@ -2583,9 +2687,24 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
                 </div>
                 <div className={`chat-bubble ${msg.role === 'user' ? 'mine' : 'other'}`}>
                   {msg.role === 'assistant' ? (
-                    // 流式过程中显示纯文本（打字机效果），流结束后渲染 Markdown
-                    isStreaming && i === allMessages.length - 1 ? (
-                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{msg.content}</div>
+                    // 流式过程中边接收边渲染 Markdown，添加光标效果
+                    (isStreaming || typewriterIndex >= 0) && i === allMessages.length - 1 ? (
+                      <div className="markdown-content" style={{ position: 'relative' }}>
+                        {renderMessageContent(msg.content)}
+                        {/* 光标效果 */}
+                        {typewriterIndex > 0 && typewriterIndex < msg.content.length && (
+                          <span style={{
+                            position: 'absolute',
+                            right: '-2px',
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            width: '2px',
+                            height: '18px',
+                            background: '#9D50BB',
+                            animation: 'blink 1s infinite'
+                          }}></span>
+                        )}
+                      </div>
                     ) : (
                       renderMessageContent(msg.content)
                     )
@@ -2623,9 +2742,20 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
               onChange={(e) => setInputMessage(e.target.value)}
               onKeyPress={handleKeyPress}
             />
-            <button className="chat-send-btn" onClick={handleSend} disabled={!inputMessage.trim() || isTyping}>
-              <i className="fa-solid fa-paper-plane" style={{ fontSize: '12px' }}></i>
-            </button>
+            {isStreaming ? (
+              <button
+                className="chat-send-btn"
+                onClick={handleStop}
+                style={{ background: 'linear-gradient(135deg, #EF4444, #DC2626)' }}
+                title="停止生成"
+              >
+                <i className="fa-solid fa-stop" style={{ fontSize: '12px' }}></i>
+              </button>
+            ) : (
+              <button className="chat-send-btn" onClick={handleSend} disabled={!inputMessage.trim() || isTyping}>
+                <i className="fa-solid fa-paper-plane" style={{ fontSize: '12px' }}></i>
+              </button>
+            )}
           </div>
         </div>
       </div>
