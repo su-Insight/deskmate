@@ -12,6 +12,7 @@ import sqlite3
 import uuid
 import httpx
 import hashlib
+import stat
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from contextlib import contextmanager
@@ -334,6 +335,362 @@ def handle_config():
 @socketio.on('connect')
 def test_connect():
     emit('status', {'data': 'Connected'})
+
+# ============================================
+# 8. SSH/SFTP 连接管理
+# ============================================
+
+import paramiko
+
+# 全局 SSH 连接池 {connection_id: {'ssh': SSHClient, 'sftp': SFTPClient, 'last_used': timestamp}}
+ssh_connections: Dict[str, Dict] = {}
+SSH_POOL_SIZE = 10
+SSH_TIMEOUT = 300  # 5分钟超时
+
+def get_ssh_client(host: str, port: int, username: str, password: str) -> paramiko.SSHClient:
+    """创建并验证 SSH 连接"""
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # 使用更可靠的连接参数
+    ssh.connect(
+        hostname=host,
+        port=port,
+        username=username,
+        password=password,
+        timeout=15,
+        banner_timeout=15,
+        auth_timeout=15,
+        allow_agent=False,
+        look_for_keys=False
+    )
+    # 确保连接会话已建立
+    ssh.get_transport()
+    return ssh
+
+def close_ssh_connection(conn_id: str):
+    """关闭 SSH 连接"""
+    if conn_id in ssh_connections:
+        try:
+            ssh_connections[conn_id]['sftp'].close()
+            ssh_connections[conn_id]['ssh'].close()
+        except Exception:
+            pass
+        del ssh_connections[conn_id]
+
+@app.route('/api/ssh/test', methods=['POST'])
+def test_ssh_connection():
+    """测试 SSH 连接"""
+    data = request.json
+    host = data.get('host', '').strip()
+    port = int(data.get('port', 22))
+    username = data.get('username', '').strip()
+    password = data.get('password', '')
+
+    if not all([host, username, password]):
+        return jsonify({'success': False, 'error': '请填写完整的连接信息'}), 400
+
+    try:
+        ssh = get_ssh_client(host, port, username, password)
+        # 确保传输层完全建立
+        transport = ssh.get_transport()
+        if transport is None or not transport.is_authenticated():
+            ssh.close()
+            return jsonify({'success': False, 'error': 'SSH 认证失败'}), 401
+
+        # 打开 SFTP 并测试
+        sftp = ssh.open_sftp()
+        try:
+            # 测试访问根目录
+            sftp.stat('/')
+        finally:
+            sftp.close()
+        ssh.close()
+        return jsonify({'success': True, 'message': '连接成功'})
+    except paramiko.AuthenticationException:
+        return jsonify({'success': False, 'error': '认证失败，请检查用户名和密码'}), 401
+    except paramiko.SSHException as e:
+        error_msg = str(e)
+        if 'No route to host' in error_msg or 'Connection refused' in error_msg:
+            return jsonify({'success': False, 'error': f'无法连接到服务器，请检查主机地址和端口 ({port}) 是否正确'}), 500
+        return jsonify({'success': False, 'error': f'SSH 错误: {error_msg}'}), 500
+    except Exception as e:
+        error_msg = str(e)
+        if 'Name or service not known' in error_msg:
+            return jsonify({'success': False, 'error': '无法解析主机名，请检查服务器地址是否正确'}), 500
+        return jsonify({'success': False, 'error': f'连接失败: {error_msg}'}), 500
+
+@app.route('/api/ssh/connect', methods=['POST'])
+def ssh_connect():
+    """建立持久 SSH 连接"""
+    data = request.json
+    host = data.get('host', '').strip()
+    port = int(data.get('port', 22))
+    username = data.get('username', '').strip()
+    password = data.get('password', '')
+    root_path = data.get('root', '/').strip()  # 支持自定义根目录
+
+    if not all([host, username, password]):
+        return jsonify({'success': False, 'error': '连接信息不完整'}), 400
+
+    # 生成连接 ID
+    conn_id = f"{username}@{host}:{port}-{root_path}"
+
+    # 如果已有连接，先关闭
+    close_ssh_connection(conn_id)
+
+    try:
+        ssh = get_ssh_client(host, port, username, password)
+        # 再次确认连接已认证
+        transport = ssh.get_transport()
+        if transport is None or not transport.is_authenticated():
+            ssh.close()
+            return jsonify({'success': False, 'error': 'SSH 认证失败'}), 401
+
+        # 打开 SFTP
+        sftp = ssh.open_sftp()
+
+        # 验证自定义根目录是否存在
+        try:
+            sftp.stat(root_path)
+        except FileNotFoundError:
+            sftp.close()
+            ssh.close()
+            return jsonify({'success': False, 'error': f'根目录不存在: {root_path}'}), 400
+
+        ssh_connections[conn_id] = {
+            'ssh': ssh,
+            'sftp': sftp,
+            'root': root_path,
+            'host': host,
+            'username': username,
+            'last_used': datetime.now().timestamp()
+        }
+
+        return jsonify({
+            'success': True,
+            'connection_id': conn_id,
+            'root': root_path
+        })
+    except paramiko.AuthenticationException:
+        return jsonify({'success': False, 'error': '认证失败，请检查用户名和密码'}), 401
+    except Exception as e:
+        error_msg = str(e)
+        if 'No route to host' in error_msg or 'Connection refused' in error_msg:
+            return jsonify({'success': False, 'error': f'无法连接到服务器 (端口 {port})'}), 500
+        return jsonify({'success': False, 'error': error_msg}), 500
+
+@app.route('/api/ssh/disconnect', methods=['POST'])
+def ssh_disconnect():
+    """断开 SSH 连接"""
+    data = request.json
+    conn_id = data.get('connection_id', '')
+    close_ssh_connection(conn_id)
+    return jsonify({'success': True})
+
+@app.route('/api/ssh/ls', methods=['POST'])
+def ssh_list_files():
+    """列出远程目录文件"""
+    data = request.json
+    conn_id = data.get('connection_id', '')
+    path = data.get('path', '')
+
+    if conn_id not in ssh_connections:
+        return jsonify({'error': '连接已断开'}), 400
+
+    conn = ssh_connections[conn_id]
+    conn['last_used'] = datetime.now().timestamp()
+
+    # 使用存储的根目录作为基础路径
+    root = conn.get('root', '/')
+
+    try:
+        # 确保路径以根目录开头（绝对路径直接使用，相对路径则基于root）
+        if path.startswith('/'):
+            # 绝对路径直接使用
+            pass
+        elif path:
+            # 相对路径，基于root构建
+            path = root if root == '/' else root
+            if not path.endswith('/'):
+                path += '/'
+            path += path.lstrip('/')
+        else:
+            path = root
+
+        files = []
+        for entry in conn['sftp'].listdir_attr(path):
+            file_type = 'folder' if stat.S_ISDIR(entry.st_mode) else 'file'
+            files.append({
+                'name': entry.filename,
+                'type': file_type,
+                'path': f"{path}/{entry.filename}".replace('//', '/'),
+                'size': entry.st_size,
+                'mtime': entry.st_mtime
+            })
+        return jsonify({'success': True, 'files': files})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ssh/read', methods=['POST'])
+def ssh_read_file():
+    """读取远程文件内容"""
+    data = request.json
+    conn_id = data.get('connection_id', '')
+    path = data.get('path', '')
+
+    if conn_id not in ssh_connections:
+        return jsonify({'error': '连接已断开'}), 400
+
+    conn = ssh_connections[conn_id]
+    conn['last_used'] = datetime.now().timestamp()
+
+    # 确保路径以根目录开头（绝对路径直接使用，相对路径则基于root）
+    root = conn.get('root', '/')
+    if path.startswith('/'):
+        pass  # 绝对路径直接使用
+    elif path:
+        path = (root if root == '/' else root) + '/' + path.lstrip('/')
+    else:
+        path = root
+
+    try:
+        with conn['sftp'].file(path, 'r') as remote_file:
+            content = remote_file.read().decode('utf-8', errors='ignore')
+        return jsonify({'success': True, 'content': content})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================
+# 9. 网站图标获取
+# ============================================
+
+import re
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+
+
+def extract_icons(target_url):
+    """从网站提取图标"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+
+    try:
+        # 处理 URL，去除路径只保留域名
+        from urllib.parse import urlparse
+        parsed = urlparse(target_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+        response = httpx.get(base_url, headers=headers, timeout=10, follow_redirects=True)
+        response.raise_for_status()
+        html_content = response.text
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+        icons = []
+
+        for link in soup.find_all('link'):
+            rel = link.get('rel')
+            href = link.get('href')
+
+            if not rel or not href:
+                continue
+
+            if isinstance(rel, str):
+                rel = rel.split()
+
+            rel_lower = [r.lower() for r in rel]
+
+            if 'icon' in rel_lower or 'apple-touch-icon' in rel_lower:
+                if href.startswith('http://') or href.startswith('https://'):
+                    final_url = href
+                elif href.startswith('//'):
+                    final_url = 'https:' + href
+                else:
+                    final_url = urljoin(base_url, href)
+
+                icons.append({
+                    'type': link.get('type', 'unknown'),
+                    'sizes': link.get('sizes', 'any'),
+                    'url': final_url
+                })
+
+        return icons
+
+    except Exception as e:
+        print(f"解析图标出错: {e}")
+        return []
+
+
+def score_icon(icon_data):
+    """为图标打分"""
+    score = 0
+    url = icon_data['url'].lower()
+    rel = str(icon_data.get('rel', '')).lower()
+    size_str = str(icon_data.get('sizes', 'any')).lower()
+
+    if 'apple-touch-icon' in rel:
+        score += 100
+    elif 'manifest' in rel:
+        score += 90
+    elif 'fluid-icon' in rel:
+        score += 80
+    elif 'mask-icon' in rel:
+        score += 70
+
+    sizes = re.findall(r'\d+', size_str)
+    if sizes:
+        width = int(sizes[0])
+        if 120 <= width <= 256:
+            score += 50
+        elif width > 256:
+            score += 40
+        elif width < 64:
+            score -= 20
+
+    if url.endswith('.svg'):
+        score += 60
+    elif url.endswith('.png'):
+        score += 30
+    elif url.endswith('.ico'):
+        score += 10
+
+    return score
+
+
+def select_best_icon(icon_list):
+    """选择最优图标"""
+    if not icon_list:
+        return None
+    sorted_icons = sorted(icon_list, key=score_icon, reverse=True)
+    return sorted_icons[0]
+
+
+@app.route('/api/icons/extract', methods=['POST'])
+def get_website_icon():
+    """获取网站图标 API"""
+    data = request.get_json() or {}
+    website = data.get('website', '').strip()
+
+    if not website:
+        return jsonify({'success': False, 'error': '网站地址不能为空'}), 400
+
+    # 确保 URL 有协议头
+    if not website.startswith(('http://', 'https://')):
+        website = 'https://' + website
+
+    icons = extract_icons(website)
+
+    if not icons:
+        return jsonify({'success': True, 'icon_url': None, 'message': '未找到图标，使用默认'})
+
+    best = select_best_icon(icons)
+    return jsonify({
+        'success': True,
+        'icon_url': best['url'] if best else None,
+        'all_icons': icons
+    })
+
 
 if __name__ == '__main__':
     print(f"DeskMate Backend 运行中... 数据库: {DB_PATH}")

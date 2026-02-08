@@ -183,6 +183,7 @@ function App() {
   const navItems = [
     { id: 'workspace', icon: 'fa-th' },
     { id: 'files', icon: 'fa-folder' },
+    { id: 'secrets', icon: 'fa-key' },
     { id: 'tasks', icon: 'fa-check-square' },
     { id: 'calendar', icon: 'fa-calendar' },
     { id: 'ai', icon: 'fa-robot' },
@@ -222,6 +223,7 @@ function App() {
       <main className="main-content">
         {activeNav === 'workspace' && <DashboardView />}
         {activeNav === 'files' && <FilesView />}
+        {activeNav === 'secrets' && <SecretsView />}
         {activeNav === 'tasks' && <TasksView />}
         {activeNav === 'calendar' && <CalendarView />}
         {activeNav === 'ai' && (
@@ -516,17 +518,2954 @@ function TaskCard({ title, description, date, status, avatars, comments }: Task)
   );
 }
 
-function FilesView() {
-  return (
-    <div>
-      <header className="page-header">
-        <div>
-          <h1 className="page-title">Files</h1>
+interface SSHFile {
+  name: string;
+  type: 'file' | 'folder';
+  path: string;
+  size?: number;
+  mtime?: number;
+}
+
+interface SSHConnection {
+  id: string;
+  host: string;
+  username: string;
+  root: string;
+  name?: string;
+}
+
+// 本地存储的连接配置
+interface SavedConnection {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  root: string;  // SSH 根目录
+  password?: string;  // 可选的记住密码
+}
+
+function SecretsView() {
+  const [activeSubNav, setActiveSubNav] = useState<'passwords' | 'apikeys' | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterTag, setFilterTag] = useState<string>('all');
+  const [toast, setToast] = useState<{msg: string, type: string} | null>(null);
+
+  // Modal state
+  const [showModal, setShowModal] = useState(false);
+  const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [fetchingIcon, setFetchingIcon] = useState(false);
+
+  // Delete confirmation modal state
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{id: string, type: 'password' | 'apikey', title: string} | null>(null);
+
+  // Form state
+  const [formData, setFormData] = useState({
+    title: '', website: '', password: '', remark: '', tags: '', iconUrl: '',
+    name: '', apiKey: '', platform: 'OpenAI'
+  });
+  const [passwordList, setPasswordList] = useState<Array<{
+    id: string;
+    title: string;
+    website: string;
+    password: string;
+    remark: string;
+    iconUrl: string;
+    tags: string[];
+    createdAt: number;
+  }>>(() => {
+    const saved = localStorage.getItem('deskmate_passwords');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  // API Key 列表状态
+  const [apiKeyList, setApiKeyList] = useState<Array<{
+    id: string;
+    name: string;
+    apiKey: string;
+    remark: string;
+    platform: string;
+    tags: string[];
+    createdAt: number;
+  }>>(() => {
+    const saved = localStorage.getItem('deskmate_apikeys');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  // 过滤和搜索
+  const filteredPasswords = passwordList.filter(p => {
+    const matchesSearch = p.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          p.website.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          p.remark.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesTag = filterTag === 'all' || p.tags.includes(filterTag);
+    return matchesSearch && matchesTag;
+  });
+
+  const filteredApiKeys = apiKeyList.filter(k => {
+    const matchesSearch = k.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          k.remark.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesTag = filterTag === 'all' || k.tags.includes(filterTag);
+    return matchesSearch && matchesTag;
+  });
+
+  // 获取所有标签
+  const allPasswordTags = [...new Set(passwordList.flatMap(p => p.tags || []))];
+  const allApiKeyTags = [...new Set(apiKeyList.flatMap(k => k.tags || []))];
+  const allPlatforms = [...new Set(apiKeyList.map(k => k.platform || '其他'))];
+
+  // 添加密码
+  const addPassword = (password: { title: string; website: string; password: string; remark: string; iconUrl?: string; tags?: string[] }) => {
+    const newPassword = {
+      id: Date.now().toString(),
+      ...password,
+      iconUrl: password.iconUrl || '',
+      tags: password.tags || [],
+      createdAt: Date.now()
+    };
+    const newList = [...passwordList, newPassword];
+    setPasswordList(newList);
+    localStorage.setItem('deskmate_passwords', JSON.stringify(newList));
+  };
+
+  // 删除密码
+  const deletePassword = (id: string) => {
+    const newList = passwordList.filter(p => p.id !== id);
+    setPasswordList(newList);
+    localStorage.setItem('deskmate_passwords', JSON.stringify(newList));
+  };
+
+  // 更新密码
+  const updatePassword = (id: string, data: { title: string; website: string; password: string; remark: string; iconUrl?: string; tags?: string[] }) => {
+    const newList = passwordList.map(p => p.id === id ? { ...p, ...data, iconUrl: data.iconUrl || p.iconUrl || '', tags: data.tags || p.tags } : p);
+    setPasswordList(newList);
+    localStorage.setItem('deskmate_passwords', JSON.stringify(newList));
+  };
+
+  // Toast 提示
+  const showToast = (msg: string, type: string) => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 2000);
+  };
+
+  // 复制到剪贴板
+  const copyToClipboard = async (text: string, type: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(`${type}已复制到剪贴板`, 'success');
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  // 添加 API Key
+  const addApiKey = (apiKey: { name: string; apiKey: string; remark: string; platform?: string; tags?: string[] }) => {
+    const newApiKey = {
+      id: Date.now().toString(),
+      ...apiKey,
+      platform: apiKey.platform || '自定义',
+      tags: apiKey.tags || [],
+      createdAt: Date.now()
+    };
+    const newList = [...apiKeyList, newApiKey];
+    setApiKeyList(newList);
+    localStorage.setItem('deskmate_apikeys', JSON.stringify(newList));
+  };
+
+  // 删除 API Key
+  const deleteApiKey = (id: string) => {
+    const newList = apiKeyList.filter(k => k.id !== id);
+    setApiKeyList(newList);
+    localStorage.setItem('deskmate_apikeys', JSON.stringify(newList));
+  };
+
+  // 更新 API Key
+  const updateApiKey = (id: string, data: { name: string; apiKey: string; remark: string; platform?: string; tags?: string[] }) => {
+    const newList = apiKeyList.map(k => k.id === id ? { ...k, ...data, platform: data.platform || k.platform, tags: data.tags || k.tags } : k);
+    setApiKeyList(newList);
+    localStorage.setItem('deskmate_apikeys', JSON.stringify(newList));
+  };
+
+  // 获取网站图标
+  const fetchWebsiteIcon = async () => {
+    const website = formData.website.trim();
+    if (!website) {
+      showToast('请先输入网站地址', 'error');
+      return;
+    }
+
+    setFetchingIcon(true);
+    try {
+      const websiteForFetch = website.startsWith('http') ? website : `https://${website}`;
+      const response = await fetch('/api/icons/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ website: websiteForFetch })
+      });
+      const data = await response.json();
+      if (data.success && data.icon_url) {
+        setFormData({ ...formData, iconUrl: data.icon_url });
+        showToast('图标获取成功', 'success');
+      } else {
+        setFormData({ ...formData, iconUrl: '' });
+        showToast('未找到图标，使用默认图标', 'info');
+      }
+    } catch (err) {
+      console.error('获取图标失败:', err);
+      showToast('获取图标失败', 'error');
+    } finally {
+      setFetchingIcon(false);
+    }
+  };
+
+  // 格式化时间
+  const formatTime = (timestamp: number) => {
+    const date = new Date(timestamp);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  };
+
+  // 渲染主视图（两个选项卡）
+  if (!activeSubNav) {
+    return (
+      <>
+        <div className="page-header" style={{ margin: '-20px -24px 20px -24px', padding: '16px 24px' }}>
+          <div>
+            <div className="page-title">秘密管理</div>
+            <div className="page-subtitle">集中管理您的密码和 API Key</div>
+          </div>
         </div>
+
+        <div style={{ display: 'flex', gap: '20px' }}>
+          {/* 密码管理卡片 */}
+          <div
+            className="card"
+            style={{
+              flex: 1,
+              cursor: 'pointer',
+              overflow: 'hidden'
+            }}
+            onClick={() => setActiveSubNav('passwords')}
+          >
+            {/* 顶部大背景 */}
+            <div style={{
+              height: '140px',
+              background: 'linear-gradient(135deg, #FF8E53 0%, #FF6A00 50%, #E55A00 100%)',
+              position: 'relative',
+              overflow: 'hidden'
+            }}>
+              {/* 背景装饰 */}
+              <div style={{
+                position: 'absolute',
+                top: '20px',
+                left: '20px',
+                width: '120px',
+                height: '120px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.08)',
+                border: '2px solid rgba(255, 255, 255, 0.1)'
+              }}></div>
+              <div style={{
+                position: 'absolute',
+                bottom: '-30px',
+                right: '-20px',
+                width: '100px',
+                height: '100px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.12)'
+              }}></div>
+              <div style={{
+                position: 'absolute',
+                top: '-20px',
+                right: '30%',
+                width: '60px',
+                height: '60px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.08)'
+              }}></div>
+
+              {/* 中央图标 */}
+              <div style={{
+                position: 'absolute',
+                top: '50%',
+                left: '30px',
+                transform: 'translateY(-50%)',
+                width: '70px',
+                height: '70px',
+                borderRadius: '18px',
+                background: 'rgba(255, 255, 255, 0.95)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)'
+              }}>
+                <i className="fa-solid fa-shield-halved" style={{ fontSize: '32px', color: '#FF6A00' }}></i>
+              </div>
+
+              {/* 标题 */}
+              <div style={{
+                position: 'absolute',
+                top: '50%',
+                left: '115px',
+                transform: 'translateY(-50%)',
+                color: 'white'
+              }}>
+                <div style={{ fontSize: '20px', fontWeight: 700, marginBottom: '4px' }}>密码管理</div>
+                <div style={{ fontSize: '13px', opacity: 0.9 }}>安全存储密码</div>
+              </div>
+            </div>
+
+            {/* 内容区域 */}
+            <div style={{ padding: '20px' }}>
+              {/* 统计行 */}
+              <div style={{
+                display: 'flex',
+                gap: '12px',
+                marginBottom: '20px'
+              }}>
+                <div style={{
+                  flex: 1,
+                  padding: '14px',
+                  background: 'linear-gradient(135deg, rgba(255, 142, 83, 0.1), rgba(255, 106, 0, 0.05))',
+                  borderRadius: '12px',
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: '24px', fontWeight: 700, color: '#FF6A00' }}>{passwordList.length}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>已保存</div>
+                </div>
+                <div style={{
+                  flex: 1,
+                  padding: '14px',
+                  background: 'rgba(16, 185, 129, 0.08)',
+                  borderRadius: '12px',
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: '24px', fontWeight: 700, color: '#10B981' }}>100%</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>本地存储</div>
+                </div>
+              </div>
+
+              {/* 功能网格 */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '10px',
+                marginBottom: '16px'
+              }}>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(255, 142, 83, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #FF8E53, #FF6A00)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-copy" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>一键复制</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>快速使用</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(59, 130, 246, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #3B82F6, #2563EB)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-search" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>智能搜索</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>快速定位</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(16, 185, 129, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #10B981, #059669)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-lock" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>加密存储</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>安全可靠</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(245, 158, 11, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #F59E0B, #D97706)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-tag" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>标签分类</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>轻松管理</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 进入按钮 */}
+              <div style={{
+                padding: '14px',
+                background: 'linear-gradient(135deg, #FF8E53, #FF6A00)',
+                borderRadius: '12px',
+                textAlign: 'center',
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}>
+                <span>管理我的密码</span>
+                <i className="fa-solid fa-arrow-right"></i>
+              </div>
+            </div>
+          </div>
+
+          {/* API Key 管理卡片 */}
+          <div
+            className="card"
+            style={{
+              flex: 1,
+              cursor: 'pointer',
+              overflow: 'hidden'
+            }}
+            onClick={() => setActiveSubNav('apikeys')}
+          >
+            {/* 顶部大背景 */}
+            <div style={{
+              height: '140px',
+              background: 'linear-gradient(135deg, #9D50BB 0%, #6E48AA 50%, #5B3A9E 100%)',
+              position: 'relative',
+              overflow: 'hidden'
+            }}>
+              {/* 背景装饰 */}
+              <div style={{
+                position: 'absolute',
+                top: '20px',
+                left: '20px',
+                width: '120px',
+                height: '120px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.08)',
+                border: '2px solid rgba(255, 255, 255, 0.1)'
+              }}></div>
+              <div style={{
+                position: 'absolute',
+                bottom: '-30px',
+                right: '-20px',
+                width: '100px',
+                height: '100px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.12)'
+              }}></div>
+              <div style={{
+                position: 'absolute',
+                top: '-20px',
+                right: '30%',
+                width: '60px',
+                height: '60px',
+                borderRadius: '50%',
+                background: 'rgba(255, 255, 255, 0.08)'
+              }}></div>
+
+              {/* 中央图标 */}
+              <div style={{
+                position: 'absolute',
+                top: '50%',
+                left: '30px',
+                transform: 'translateY(-50%)',
+                width: '70px',
+                height: '70px',
+                borderRadius: '18px',
+                background: 'rgba(255, 255, 255, 0.95)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)'
+              }}>
+                <i className="fa-solid fa-key" style={{ fontSize: '28px', color: '#6E48AA' }}></i>
+              </div>
+
+              {/* 标题 */}
+              <div style={{
+                position: 'absolute',
+                top: '50%',
+                left: '115px',
+                transform: 'translateY(-50%)',
+                color: 'white'
+              }}>
+                <div style={{ fontSize: '20px', fontWeight: 700, marginBottom: '4px' }}>API Key 管理</div>
+                <div style={{ fontSize: '13px', opacity: 0.9 }}>多平台密钥管理</div>
+              </div>
+            </div>
+
+            {/* 内容区域 */}
+            <div style={{ padding: '20px' }}>
+              {/* 统计行 */}
+              <div style={{
+                display: 'flex',
+                gap: '12px',
+                marginBottom: '20px'
+              }}>
+                <div style={{
+                  flex: 1,
+                  padding: '14px',
+                  background: 'linear-gradient(135deg, rgba(157, 80, 187, 0.1), rgba(110, 72, 170, 0.05))',
+                  borderRadius: '12px',
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: '24px', fontWeight: 700, color: '#6E48AA' }}>{apiKeyList.length}</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>已保存</div>
+                </div>
+                <div style={{
+                  flex: 1,
+                  padding: '14px',
+                  background: 'rgba(139, 92, 246, 0.08)',
+                  borderRadius: '12px',
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: '24px', fontWeight: 700, color: '#8B5CF6' }}>∞</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>多平台</div>
+                </div>
+              </div>
+
+              {/* 支持的平台 */}
+              {/* <div style={{ marginBottom: '16px' }}>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '10px' }}>支持平台</div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  {['OpenAI', 'Claude', 'DeepSeek', 'SiliconFlow'].slice(0, 4).map((platform, idx) => (
+                    <div key={platform} style={{
+                      padding: '6px 12px',
+                      background: 'rgba(139, 92, 246, 0.08)',
+                      borderRadius: '20px',
+                      fontSize: '12px',
+                      color: '#6E48AA',
+                      fontWeight: 500
+                    }}>
+                      {platform}
+                    </div>
+                  ))}
+                </div>
+              </div> */}
+
+              {/* 功能网格 */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '10px',
+                marginBottom: '16px'
+              }}>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(139, 92, 246, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-copy" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>一键复制</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>快速使用</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(59, 130, 246, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #3B82F6, #2563EB)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-server" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>多平台</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>统一管理</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(16, 185, 129, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #10B981, #059669)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-shield-alt" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>安全存储</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>本地保存</div>
+                  </div>
+                </div>
+                <div style={{
+                  padding: '12px',
+                  background: 'rgba(245, 158, 11, 0.06)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px'
+                }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '8px',
+                    background: 'linear-gradient(135deg, #F59E0B, #D97706)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-bolt" style={{ fontSize: '14px', color: 'white' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13px', fontWeight: 500 }}>快速接入</div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>即用即取</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 进入按钮 */}
+              <div style={{
+                padding: '14px',
+                background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                borderRadius: '12px',
+                textAlign: 'center',
+                color: 'white',
+                fontSize: '14px',
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}>
+                <span>管理我的 Key</span>
+                <i className="fa-solid fa-arrow-right"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // 渲染子视图
+  const isPasswordMode = activeSubNav === 'passwords';
+  const currentList = isPasswordMode ? filteredPasswords : filteredApiKeys;
+  const currentTags = isPasswordMode ? allPasswordTags : allApiKeyTags;
+  const currentPlatforms = allPlatforms;
+
+  return (
+    <>
+      <div className="page-header" style={{ margin: '-20px -24px 20px -24px', padding: '16px 24px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div
+            className="icon-btn"
+            onClick={() => {
+              setActiveSubNav(null);
+              setSearchTerm('');
+              setFilterTag('all');
+            }}
+            style={{ width: '32px', height: '32px' }}
+          >
+            <i className="fa-solid fa-arrow-left"></i>
+          </div>
+          <div>
+            <div className="page-title">{isPasswordMode ? '密码管理' : 'API Key 管理'}</div>
+            <div className="page-subtitle">
+              {currentList.length} / {isPasswordMode ? passwordList.length : apiKeyList.length} 项
+            </div>
+          </div>
+        </div>
+        <div className="header-actions">
+          <div
+            className="icon-btn"
+            onClick={() => {
+              setModalMode('add');
+              setEditingId(null);
+              setFormData({
+                title: '', website: '', password: '', remark: '', tags: '', iconUrl: '',
+                name: '', apiKey: '', platform: 'OpenAI'
+              });
+              setShowModal(true);
+            }}
+          >
+            <i className="fa-solid fa-plus"></i>
+          </div>
+        </div>
+      </div>
+
+      {/* 搜索栏 */}
+      <div style={{
+        display: 'flex',
+        gap: '12px',
+        marginBottom: '16px'
+      }}>
+        <div style={{
+          flex: 1,
+          position: 'relative'
+        }}>
+          <i className="fa-solid fa-search" style={{
+            position: 'absolute',
+            left: '14px',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            color: 'var(--text-secondary)'
+          }}></i>
+          <input
+            type="text"
+            placeholder="搜索..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '10px 14px 10px 40px',
+              border: '1px solid rgba(255, 255, 255, 0.3)',
+              borderRadius: '12px',
+              background: 'rgba(255, 255, 255, 0.6)',
+              backdropFilter: 'blur(10px)',
+              fontSize: '13px',
+              outline: 'none',
+              boxSizing: 'border-box'
+            }}
+          />
+          {searchTerm && (
+            <i
+              className="fa-solid fa-times"
+              onClick={() => setSearchTerm('')}
+              style={{
+                position: 'absolute',
+                right: '14px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                cursor: 'pointer',
+                color: 'var(--text-secondary)'
+              }}
+            ></i>
+          )}
+        </div>
+        {/* 标签筛选 */}
+        <div style={{
+          display: 'flex',
+          gap: '6px',
+          padding: '4px',
+          background: 'rgba(255, 255, 255, 0.4)',
+          borderRadius: '10px',
+          backdropFilter: 'blur(10px)'
+        }}>
+          <div
+            onClick={() => setFilterTag('all')}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '8px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              background: filterTag === 'all' ? (isPasswordMode ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'linear-gradient(135deg, #9D50BB, #6E48AA)') : 'transparent',
+              color: filterTag === 'all' ? 'white' : 'var(--text-secondary)',
+              fontWeight: 500
+            }}
+          >
+            全部
+          </div>
+          {isPasswordMode ? (
+            allPasswordTags.slice(0, 3).map(tag => (
+              <div
+                key={tag}
+                onClick={() => setFilterTag(tag)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  background: filterTag === tag ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'transparent',
+                  color: filterTag === tag ? 'white' : 'var(--text-secondary)',
+                  fontWeight: 500
+                }}
+              >
+                {tag}
+              </div>
+            ))
+          ) : (
+            allPlatforms.slice(0, 3).map(platform => (
+              <div
+                key={platform}
+                onClick={() => setFilterTag(platform)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  background: filterTag === platform ? 'linear-gradient(135deg, #9D50BB, #6E48AA)' : 'transparent',
+                  color: filterTag === platform ? 'white' : 'var(--text-secondary)',
+                  fontWeight: 500
+                }}
+              >
+                {platform}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* 列表 */}
+      <div className="card" style={{ padding: '0' }}>
+        {currentList.length === 0 ? (
+          <div style={{
+            textAlign: 'center',
+            padding: '60px 20px',
+            color: 'var(--text-secondary)'
+          }}>
+            <div style={{
+              width: '80px',
+              height: '80px',
+              borderRadius: '50%',
+              background: isPasswordMode ? 'rgba(255, 142, 83, 0.1)' : 'rgba(157, 80, 187, 0.1)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              margin: '0 auto 16px'
+            }}>
+              <i className={`fa-solid ${isPasswordMode ? 'fa-lock' : 'fa-key'}`}
+                style={{
+                  fontSize: '36px',
+                  color: isPasswordMode ? '#FF8E53' : '#9D50BB',
+                  opacity: 0.5
+                }}
+              ></i>
+            </div>
+            <p style={{ marginBottom: '8px' }}>
+              {searchTerm || filterTag !== 'all' ? '未找到匹配的结果' : `暂无${isPasswordMode ? '密码' : 'API Key'}`}
+            </p>
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              点击右上角 + 添加
+            </p>
+          </div>
+        ) : (
+          <div style={{ padding: '12px' }}>
+            {currentList.map((item, index) => (
+              <div
+                key={item.id}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: '16px',
+                  background: 'rgba(255, 255, 255, 0.5)',
+                  borderRadius: '12px',
+                  marginBottom: index < currentList.length - 1 ? '8px' : '0',
+                  border: '1px solid rgba(255, 255, 255, 0.3)',
+                  transition: 'all 0.2s ease'
+                }}
+              >
+                {/* 图标 */}
+                {isPasswordMode && (item as any).iconUrl ? (
+                  <div
+                    style={{
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '12px',
+                      overflow: 'hidden',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: '14px',
+                      flexShrink: 0,
+                      background: 'rgba(255, 255, 255, 0.8)',
+                      border: '1px solid rgba(0, 0, 0, 0.08)'
+                    }}
+                  >
+                    <img
+                      src={(item as any).iconUrl}
+                      alt="网站图标"
+                      style={{ width: '28px', height: '28px', objectFit: 'contain' }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '12px',
+                      background: isPasswordMode
+                        ? 'linear-gradient(135deg, #FF8E53, #FF6A00)'
+                        : (item.platform === 'OpenAI' ? 'linear-gradient(135deg, #10A37F, #0D8A6A)'
+                          : item.platform === 'Claude' ? 'linear-gradient(135deg, #D97757, #C46547)'
+                          : item.platform === 'DeepSeek' ? 'linear-gradient(135deg, #00C7B7, #00A89A)'
+                          : 'linear-gradient(135deg, #9D50BB, #6E48AA)'),
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: '14px',
+                      flexShrink: 0
+                    }}
+                  >
+                    <i className={`fa-solid ${isPasswordMode ? 'fa-lock' : 'fa-key'}`} style={{ fontSize: '18px', color: 'white' }}></i>
+                  </div>
+                )}
+
+                {/* 主体 */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    marginBottom: '4px'
+                  }}>
+                    <span style={{ fontWeight: 600, fontSize: '14px' }}>
+                      {isPasswordMode ? (item as any).title : (item as any).name}
+                    </span>
+                    {!isPasswordMode && (item as any).platform && (
+                      <span style={{
+                        padding: '2px 8px',
+                        background: 'rgba(139, 92, 246, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '10px',
+                        color: '#8B5CF6',
+                        fontWeight: 500
+                      }}>
+                        {(item as any).platform}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    fontSize: '12px',
+                    color: 'var(--text-secondary)'
+                  }}>
+                    {isPasswordMode ? (
+                      <>
+                        <span><i className="fa-solid fa-globe" style={{ marginRight: '4px' }}></i>{(item as any).website || '-'}</span>
+                        {(item as any).remark && (
+                          <span style={{ color: 'var(--text-muted)' }}>· {(item as any).remark}</span>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <span style={{
+                          fontFamily: 'monospace',
+                          background: 'rgba(0,0,0,0.05)',
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          maxWidth: '120px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          {(item as any).apiKey.substring(0, 12)}...
+                        </span>
+                        {(item as any).remark && (
+                          <span style={{ color: 'var(--text-muted)' }}>· {(item as any).remark}</span>
+                        )}
+                      </>
+                    )}
+                    <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
+                      {formatTime(item.createdAt)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 操作按钮 */}
+                <div style={{ display: 'flex', gap: '6px', marginLeft: '12px' }}>
+                  <div
+                    className="icon-btn"
+                    onClick={() => {
+                      setModalMode('edit');
+                      setEditingId(item.id);
+                      if (isPasswordMode) {
+                        const p = item as any;
+                        setFormData({
+                          title: p.title, website: p.website || '', password: p.password, remark: p.remark || '', tags: (p.tags || []).join(', '), iconUrl: p.iconUrl || '',
+                          name: '', apiKey: '', platform: 'OpenAI'
+                        });
+                      } else {
+                        const k = item as any;
+                        setFormData({
+                          title: '', website: '', password: '', remark: '', tags: '', iconUrl: '',
+                          name: k.name, apiKey: k.apiKey, platform: k.platform || 'OpenAI'
+                        });
+                      }
+                      setShowModal(true);
+                    }}
+                    style={{ width: '36px', height: '36px' }}
+                    title="编辑"
+                  >
+                    <i className="fa-solid fa-pen"></i>
+                  </div>
+                  <div
+                    className="icon-btn"
+                    onClick={() => copyToClipboard(
+                      isPasswordMode ? (item as any).password : (item as any).apiKey,
+                      isPasswordMode ? '密码' : 'API Key'
+                    )}
+                    style={{ width: '36px', height: '36px' }}
+                    title="复制"
+                  >
+                    <i className="fa-solid fa-copy"></i>
+                  </div>
+                  <div
+                    className="icon-btn"
+                    onClick={() => {
+                      setDeleteTarget({
+                        id: item.id,
+                        type: isPasswordMode ? 'password' : 'apikey',
+                        title: isPasswordMode ? (item as any).title : (item as any).name
+                      });
+                      setShowDeleteModal(true);
+                    }}
+                    style={{ width: '36px', height: '36px', color: 'var(--accent-red)' }}
+                    title="删除"
+                  >
+                    <i className="fa-solid fa-trash"></i>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add/Edit Modal */}
+      {showModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.5)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999
+        }} onClick={() => setShowModal(false)}>
+          <div
+            className="card"
+            style={{
+              width: '440px',
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              overflow: 'auto',
+              background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.85))'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div style={{
+              padding: '20px 24px',
+              borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: isPasswordMode
+                ? 'linear-gradient(135deg, #FF8E53, #FF6A00)'
+                : 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+              color: 'white'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '10px',
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <i className={`fa-solid ${isPasswordMode ? 'fa-lock' : 'fa-key'}`} style={{ fontSize: '18px' }}></i>
+                </div>
+                <div>
+                  <div style={{ fontSize: '16px', fontWeight: 600 }}>
+                    {modalMode === 'add' ? `添加${isPasswordMode ? '密码' : 'API Key'}` : `编辑${isPasswordMode ? '密码' : 'API Key'}`}
+                  </div>
+                  <div style={{ fontSize: '12px', opacity: 0.9 }}>
+                    {isPasswordMode ? '安全存储您的密码' : '管理您的 API Key'}
+                  </div>
+                </div>
+              </div>
+              <div
+                onClick={() => setShowModal(false)}
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '8px',
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <i className="fa-solid fa-times"></i>
+              </div>
+            </div>
+
+            {/* Form */}
+            <div style={{ padding: '24px' }}>
+              {isPasswordMode ? (
+                <>
+                  {/* 密码表单 */}
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      标题 <span style={{ color: '#EF4444' }}>*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.title}
+                      onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                      placeholder="例如：GitHub 账号"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      网站
+                    </label>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        value={formData.website}
+                        onChange={(e) => setFormData({ ...formData, website: e.target.value })}
+                        placeholder="例如：github.com"
+                        style={{
+                          flex: 1,
+                          padding: '12px 14px',
+                          border: '1px solid rgba(0, 0, 0, 0.1)',
+                          borderRadius: '10px',
+                          fontSize: '14px',
+                          background: 'rgba(255, 255, 255, 0.8)',
+                          outline: 'none',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                      <div
+                        onClick={fetchWebsiteIcon}
+                        style={{
+                          padding: '10px 14px',
+                          borderRadius: '10px',
+                          background: fetchingIcon ? '#9CA3AF' : 'linear-gradient(135deg, #3B82F6, #2563EB)',
+                          color: 'white',
+                          fontSize: '12px',
+                          fontWeight: 500,
+                          cursor: fetchingIcon ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          whiteSpace: 'nowrap',
+                          transition: 'all 0.2s'
+                        }}
+                      >
+                        <i className={`fa-solid ${fetchingIcon ? 'fa-spinner fa-spin' : 'fa-image'}`}></i>
+                        {fetchingIcon ? '获取中...' : '获取图标'}
+                      </div>
+                    </div>
+                    {/* 图标预览 */}
+                    {formData.iconUrl && (
+                      <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <img
+                          src={formData.iconUrl}
+                          alt="网站图标"
+                          style={{ width: '24px', height: '24px', borderRadius: '4px', objectFit: 'contain' }}
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                        />
+                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{formData.iconUrl}</span>
+                        <div
+                          onClick={() => setFormData({ ...formData, iconUrl: '' })}
+                          style={{ cursor: 'pointer', color: 'var(--text-muted)', marginLeft: 'auto' }}
+                        >
+                          <i className="fa-solid fa-times"></i>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      密码 <span style={{ color: '#EF4444' }}>*</span>
+                    </label>
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type={formData.password ? 'text' : 'password'}
+                        value={formData.password}
+                        onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                        placeholder="输入密码"
+                        style={{
+                          width: '100%',
+                          padding: '12px 14px',
+                          paddingRight: '44px',
+                          border: '1px solid rgba(0, 0, 0, 0.1)',
+                          borderRadius: '10px',
+                          fontSize: '14px',
+                          background: 'rgba(255, 255, 255, 0.8)',
+                          outline: 'none',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                      <div
+                        onClick={() => setFormData({ ...formData, password: formData.password ? '' : formData.password })}
+                        style={{
+                          position: 'absolute',
+                          right: '12px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          cursor: 'pointer',
+                          color: 'var(--text-secondary)'
+                        }}
+                      >
+                        <i className={`fa-solid ${formData.password ? 'fa-eye' : 'fa-eye-slash'}`}></i>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: '20px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      备注
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.remark}
+                      onChange={(e) => setFormData({ ...formData, remark: e.target.value })}
+                      placeholder="可选备注信息"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* API Key 表单 */}
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      名称 <span style={{ color: '#EF4444' }}>*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.name}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      placeholder="例如：OpenAI 主密钥"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      平台
+                    </label>
+                    <select
+                      value={formData.platform}
+                      onChange={(e) => setFormData({ ...formData, platform: e.target.value })}
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <option value="OpenAI">OpenAI</option>
+                      <option value="Claude">Claude</option>
+                      <option value="DeepSeek">DeepSeek</option>
+                      <option value="SiliconFlow">SiliconFlow</option>
+                      <option value="Google">Google</option>
+                      <option value="Anthropic">Anthropic</option>
+                      <option value="Azure">Azure</option>
+                      <option value="自定义">自定义</option>
+                    </select>
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      API Key <span style={{ color: '#EF4444' }}>*</span>
+                    </label>
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type={formData.apiKey ? 'text' : 'password'}
+                        value={formData.apiKey}
+                        onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
+                        placeholder="sk-..."
+                        style={{
+                          width: '100%',
+                          padding: '12px 14px',
+                          paddingRight: '44px',
+                          border: '1px solid rgba(0, 0, 0, 0.1)',
+                          borderRadius: '10px',
+                          fontSize: '14px',
+                          background: 'rgba(255, 255, 255, 0.8)',
+                          outline: 'none',
+                          boxSizing: 'border-box',
+                          fontFamily: 'monospace'
+                        }}
+                      />
+                      <div
+                        onClick={() => setFormData({ ...formData, apiKey: formData.apiKey ? '' : formData.apiKey })}
+                        style={{
+                          position: 'absolute',
+                          right: '12px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          cursor: 'pointer',
+                          color: 'var(--text-secondary)'
+                        }}
+                      >
+                        <i className={`fa-solid ${formData.apiKey ? 'fa-eye' : 'fa-eye-slash'}`}></i>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: '20px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      备注
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.remark}
+                      onChange={(e) => setFormData({ ...formData, remark: e.target.value })}
+                      placeholder="可选备注信息"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+                </>
+              )}
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <div
+                  onClick={() => setShowModal(false)}
+                  style={{
+                    flex: 1,
+                    padding: '14px',
+                    borderRadius: '12px',
+                    background: 'rgba(0, 0, 0, 0.05)',
+                    color: 'var(--text-secondary)',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  取消
+                </div>
+                <div
+                  onClick={() => {
+                    const isValid = isPasswordMode ? formData.title && formData.password : formData.name && formData.apiKey;
+                    if (!isValid) {
+                      showToast('请填写必填项', 'error');
+                      return;
+                    }
+                    if (modalMode === 'add') {
+                      if (isPasswordMode) {
+                        addPassword({
+                          title: formData.title,
+                          website: formData.website,
+                          password: formData.password,
+                          remark: formData.remark,
+                          iconUrl: formData.iconUrl
+                        });
+                        showToast('密码添加成功', 'success');
+                      } else {
+                        addApiKey({
+                          name: formData.name,
+                          apiKey: formData.apiKey,
+                          platform: formData.platform,
+                          remark: formData.remark
+                        });
+                        showToast('API Key 添加成功', 'success');
+                      }
+                    } else if (editingId) {
+                      if (isPasswordMode) {
+                        updatePassword(editingId, {
+                          title: formData.title,
+                          website: formData.website,
+                          password: formData.password,
+                          remark: formData.remark,
+                          iconUrl: formData.iconUrl
+                        });
+                        showToast('密码已更新', 'success');
+                      } else {
+                        updateApiKey(editingId, {
+                          name: formData.name,
+                          apiKey: formData.apiKey,
+                          platform: formData.platform,
+                          remark: formData.remark
+                        });
+                        showToast('API Key 已更新', 'success');
+                      }
+                    }
+                    setShowModal(false);
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '14px',
+                    borderRadius: '12px',
+                    background: isPasswordMode ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                    color: 'white',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {modalMode === 'add' ? '添加' : '保存'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          top: '80px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          padding: '12px 24px',
+          background: toast.type === 'success' ? '#10B981' : '#EF4444',
+          color: 'white',
+          borderRadius: '10px',
+          fontSize: '13px',
+          fontWeight: 500,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+          zIndex: 9999,
+          animation: 'fadeInOut 2s ease-in-out'
+        }}>
+          <i className="fa-solid fa-check-circle" style={{ marginRight: '8px' }}></i>
+          {toast.msg}
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && deleteTarget && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0, 0, 0, 0.5)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999
+        }} onClick={() => setShowDeleteModal(false)}>
+          <div
+            style={{
+              width: '360px',
+              maxWidth: '90vw',
+              background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.85))',
+              borderRadius: '16px',
+              overflow: 'hidden',
+              boxShadow: '0 16px 48px rgba(0, 0, 0, 0.15)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{
+              padding: '24px',
+              textAlign: 'center'
+            }}>
+              {/* Warning Icon */}
+              <div style={{
+                width: '64px',
+                height: '64px',
+                borderRadius: '50%',
+                background: 'rgba(239, 68, 68, 0.1)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 16px'
+              }}>
+                <i className="fa-solid fa-triangle-exclamation" style={{ fontSize: '28px', color: '#EF4444' }}></i>
+              </div>
+
+              <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>
+                确认删除
+              </div>
+              <div style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
+                确定要删除 <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{deleteTarget.title}</span> 吗？
+                <br />
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>此操作无法撤销</span>
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <div
+                  onClick={() => setShowDeleteModal(false)}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    borderRadius: '12px',
+                    background: 'rgba(0, 0, 0, 0.05)',
+                    color: 'var(--text-secondary)',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  取消
+                </div>
+                <div
+                  onClick={() => {
+                    if (deleteTarget.type === 'password') {
+                      deletePassword(deleteTarget.id);
+                      showToast('密码已删除', 'success');
+                    } else {
+                      deleteApiKey(deleteTarget.id);
+                      showToast('API Key 已删除', 'success');
+                    }
+                    setShowDeleteModal(false);
+                    setDeleteTarget(null);
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    borderRadius: '12px',
+                    background: '#EF4444',
+                    color: 'white',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  删除
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function FilesView() {
+  const [view, setView] = useState<'list' | 'create' | 'browse' | 'selectRoot'>('list');
+  const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
+  const [activeConnection, setActiveConnection] = useState<SSHConnection | null>(null);
+  const [files, setFiles] = useState<SSHFile[]>([]);
+  const [localFiles, setLocalFiles] = useState<SSHFile[]>([]);
+  const [currentPath, setCurrentPath] = useState('/');
+  const [localPath, setLocalPath] = useState('/');
+  const [pathHistory, setPathHistory] = useState<string[]>(['/']);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [selectedFile, setSelectedFile] = useState<SSHFile | null>(null);
+  const [fileContent, setFileContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  // 连接表单
+  const [connName, setConnName] = useState('');
+  const [editingConnId, setEditingConnId] = useState<string | null>(null); // 追踪当前编辑的连接ID
+  const [sshHost, setSshHost] = useState('');
+  const [sshPort, setSshPort] = useState(22);
+  const [sshUsername, setSshUsername] = useState('');
+  const [sshPassword, setSshPassword] = useState('');
+  const [sshRoot, setSshRoot] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberPassword, setRememberPassword] = useState(false);
+
+  // 远程文件浏览状态（用于选择根目录）
+  const [remoteFiles, setRemoteFiles] = useState<SSHFile[]>([]);
+  const [remotePath, setRemotePath] = useState('/');
+  const [remotePathHistory, setRemotePathHistory] = useState<string[]>(['/']);
+  const [remoteHistoryIndex, setRemoteHistoryIndex] = useState(0);
+  const [tempConnectionId, setTempConnectionId] = useState<string | null>(null);
+
+  // 路径输入框状态（用于浏览视图）
+  const [pathInput, setPathInput] = useState('');
+
+  // 搜索和排序状态
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortField, setSortField] = useState<'name' | 'size' | 'mtime'>('name');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [showSortMenu, setShowSortMenu] = useState(false);
+
+  // 删除确认弹窗状态
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [connToDelete, setConnToDelete] = useState<SavedConnection | null>(null);
+
+  // 加载保存的连接配置
+  useEffect(() => {
+    const saved = localStorage.getItem('ssh_connections');
+    if (saved) {
+      try {
+        // 兼容旧版本：为没有 root 字段的连接添加默认值
+        const parsed = JSON.parse(saved);
+        const withRoot = parsed.map((c: any) => ({
+          ...c,
+          root: c.root || '/'
+        }));
+        setSavedConnections(withRoot);
+      } catch {}
+    }
+  }, []);
+
+  // 保存连接配置（基于 username@host:port+root 去重，允许相同配置不同连接名）
+  const saveConnection = (conn: SavedConnection) => {
+    const existingIndex = savedConnections.findIndex(
+      c => c.username === conn.username && c.host === conn.host && c.port === conn.port && c.root === conn.root
+    );
+    let updated;
+    if (existingIndex >= 0) {
+      // 更新现有连接（保留原ID）
+      updated = [...savedConnections];
+      updated[existingIndex] = { ...conn, id: savedConnections[existingIndex].id };
+    } else {
+      // 添加新连接
+      updated = [...savedConnections, conn];
+    }
+    setSavedConnections(updated);
+    localStorage.setItem('ssh_connections', JSON.stringify(updated));
+  };
+
+  // 删除连接配置（只有用户名 服务器地址 根目录完全相同的时候才会删除）
+  const deleteConnection = async (id: string) => {
+    const connToDelete = savedConnections.find(c => c.id === id);
+    if (!connToDelete) return;
+
+    // 如果正在浏览该连接，先断开
+    if (activeConnection?.id === id) {
+      try {
+        await fetch(getServerUrl('/api/ssh/disconnect'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connection_id: id })
+        });
+      } catch (e) {
+        // 忽略断开错误
+      }
+      // 清理所有状态
+      setActiveConnection(null);
+      setFiles([]);
+      setCurrentPath('/');
+      setSelectedFile(null);
+      setFileContent('');
+      setSearchQuery('');
+      setView('list');
+    }
+
+    // 只删除 username+host+port+root 完全匹配的连接
+    const updated = savedConnections.filter(
+      c => !(c.username === connToDelete.username && c.host === connToDelete.host && c.port === connToDelete.port && c.root === connToDelete.root)
+    );
+    setSavedConnections(updated);
+    localStorage.setItem('ssh_connections', JSON.stringify(updated));
+    setShowDeleteConfirm(false);
+    setConnToDelete(null);
+  };
+
+  // 显示删除确认弹窗
+  const confirmDelete = (conn: SavedConnection) => {
+    setConnToDelete(conn);
+    setShowDeleteConfirm(true);
+  };
+
+  // 取消删除
+  const cancelDelete = () => {
+    setShowDeleteConfirm(false);
+    setConnToDelete(null);
+  };
+
+  // 测试并连接 SSH
+  const connectSSH = async (name: string, host: string, port: number, username: string, password: string, root: string, saveToList: boolean = false) => {
+    if (!host || !username || !password) {
+      setError('请填写完整的连接信息');
+      return null;
+    }
+
+    // 验证配置名称长度
+    const finalName = name || `${username}@${host}`;
+    if (finalName.length > 30) {
+      setError('配置名称不能超过30个字符');
+      return null;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      // 测试连接
+      const testRes = await fetch(getServerUrl('/api/ssh/test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, port, username, password })
+      });
+      const testData = await testRes.json();
+      if (!testData.success) {
+        setError(testData.error || '测试连接失败');
+        return null;
+      }
+
+      // 建立持久连接（包含根目录）
+      const connRes = await fetch(getServerUrl('/api/ssh/connect'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, port, username, password, root })
+      });
+      const connData = await connRes.json();
+      if (!connData.success) {
+        setError(connData.error || '连接失败');
+        return null;
+      }
+
+      // 保存到列表
+      const connId = connData.connection_id;
+      const savedConn: SavedConnection = {
+        id: connId,
+        name: name || `${username}@${host}`,
+        host,
+        port,
+        username,
+        root
+      };
+      // 如果记住密码，保存密码
+      if (rememberPassword && password) {
+        savedConn.password = password;
+      }
+      if (saveToList) {
+        saveConnection(savedConn);
+      }
+
+      return {
+        id: connId,
+        host,
+        username,
+        root: connData.root,
+        name: savedConn.name
+      };
+    } catch (e) {
+      setError('网络错误，请检查后端服务');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 连接到服务器
+  const connectToServer = async (conn: SavedConnection) => {
+    setConnName('');  // 清空名称，显示"新建连接"
+    setSshHost(conn.host);
+    setSshPort(conn.port);
+    setSshUsername(conn.username);
+    setSshRoot('');
+    // 如果有保存的密码，自动填充并勾选记住密码
+    if (conn.password) {
+      setSshPassword(conn.password);
+      setRememberPassword(true);
+    } else {
+      setSshPassword('');
+      setRememberPassword(false);
+    }
+    setError('');  // 清空错误提示
+    setView('create');
+  };
+
+  // 打开选择根目录弹窗
+  const openRootSelector = () => {
+    // 重置远程文件浏览状态
+    setError('');  // 清空错误提示
+    setRemotePath('/');
+    setRemoteFiles([]);
+    setRemotePathHistory(['/']);
+    setRemoteHistoryIndex(0);
+    setTempConnectionId(null);
+    setError('');
+    setView('selectRoot');
+  };
+
+  // 浏览本地文件系统
+  const listLocalFiles = async (path: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch(getServerUrl('/api/files/list'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setLocalFiles(data.files);
+        setLocalPath(path);
+      } else {
+        setError(data.error || '读取目录失败');
+      }
+    } catch (e) {
+      setError('网络错误');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 选择文件夹作为根目录
+  const selectRootFolder = (file: SSHFile) => {
+    if (file.type === 'folder') {
+      setError('');  // 清空错误提示
+      setSshRoot(file.path);
+      setView('create');
+    }
+  };
+
+  // 本地导航
+  const navigateLocal = (file: SSHFile) => {
+    if (file.type === 'folder') {
+      setError('');  // 清空错误提示
+      listLocalFiles(file.path);
+    }
+  };
+
+  // 本地返回上一级
+  const localGoBack = () => {
+    setError('');  // 清空错误提示
+    const parent = localPath.split('/').filter(Boolean).slice(0, -1).join('/');
+    const targetPath = parent ? `/${parent}` : '/';
+    listLocalFiles(targetPath);
+  };
+
+  // ===== 远程文件浏览（用于选择根目录）=====
+  // 测试并建立 SSH 连接（仅用于浏览远程文件系统）
+  const testAndConnectSSH = async () => {
+    if (!sshHost || !sshUsername || !sshPassword) {
+      setError('请填写服务器地址和用户名密码');
+      return null;
+    }
+
+    setLoading(true);
+    setError('');
+
+    try {
+      // 测试连接
+      const testRes = await fetch(getServerUrl('/api/ssh/test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: sshHost, port: sshPort, username: sshUsername, password: sshPassword })
+      });
+      const testData = await testRes.json();
+      if (!testData.success) {
+        setError(testData.error || '连接测试失败');
+        setLoading(false);
+        return null;
+      }
+
+      // 建立持久连接
+      const connRes = await fetch(getServerUrl('/api/ssh/connect'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: sshHost, port: sshPort, username: sshUsername, password: sshPassword, root: '/' })
+      });
+      const connData = await connRes.json();
+      if (!connData.success) {
+        setError(connData.error || '连接失败');
+        setLoading(false);
+        return null;
+      }
+
+      setTempConnectionId(connData.connection_id);
+      return connData.connection_id;
+    } catch (e) {
+      setError('网络错误');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 列出远程文件
+  const listRemoteFiles = async (path: string, connId: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch(getServerUrl('/api/ssh/ls'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: connId, path })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setRemoteFiles(data.files);
+        setRemotePath(path);
+        // 更新历史记录
+        const newHistory = remotePathHistory.slice(0, remoteHistoryIndex + 1);
+        newHistory.push(path);
+        setRemotePathHistory(newHistory);
+        setRemoteHistoryIndex(newHistory.length - 1);
+      } else {
+        setError(data.error || '读取目录失败');
+      }
+    } catch (e) {
+      setError('网络错误');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 导航到远程文件夹
+  const navigateRemote = (file: SSHFile, connId: string) => {
+    if (file.type === 'folder') {
+      listRemoteFiles(file.path, connId);
+    }
+  };
+
+  // 远程返回上一级
+  const remoteGoBack = (connId: string) => {
+    if (remoteHistoryIndex > 0) {
+      const newIndex = remoteHistoryIndex - 1;
+      const targetPath = remotePathHistory[newIndex];
+      setRemoteHistoryIndex(newIndex);
+      listRemoteFiles(targetPath, connId);
+    }
+  };
+
+  // 选择远程文件夹作为根目录
+  const selectRemoteFolder = (file: SSHFile, connId: string) => {
+    if (file.type === 'folder') {
+      // 先断开临时连接
+      fetch(getServerUrl('/api/ssh/disconnect'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: connId })
+      }).catch(() => {});
+      setTempConnectionId(null);
+      setError('');  // 清空错误提示
+      setSshRoot(file.path);
+      setView('create');
+    }
+  };
+
+  // 返回选择根目录页面时断开临时连接
+  const cancelSelectRoot = async () => {
+    if (tempConnectionId) {
+      try {
+        await fetch(getServerUrl('/api/ssh/disconnect'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connection_id: tempConnectionId })
+        });
+      } catch {}
+      setTempConnectionId(null);
+    }
+    setError('');  // 清空错误提示
+    setView('create');
+  };
+
+  // 连接成功后进入浏览
+  const handleConnectSuccess = (newConn: SSHConnection) => {
+    setActiveConnection(newConn);
+    setCurrentPath(newConn.root);
+    setPathHistory([newConn.root]);
+    setHistoryIndex(0);
+    setFiles([]);
+    setSelectedFile(null);
+    setFileContent('');
+    setView('browse');
+    listFiles(newConn.root, newConn.id);
+  };
+
+  // 执行连接（从创建视图）
+  const handleConnect = async () => {
+    const conn = await connectSSH(connName, sshHost, sshPort, sshUsername, sshPassword, sshRoot, true);
+    if (conn) {
+      handleConnectSuccess(conn);
+    }
+  };
+
+  // 快速连接（从列表点击）
+  const handleQuickConnect = async (savedConn: SavedConnection) => {
+    // 恢复保存的连接信息
+    setConnName(savedConn.name);
+    setSshHost(savedConn.host);
+    setSshPort(savedConn.port);
+    setSshUsername(savedConn.username);
+    // 如果有保存的密码，自动填充并勾选记住密码
+    if (savedConn.password) {
+      setSshPassword(savedConn.password);
+      setRememberPassword(true);
+    } else {
+      setSshPassword('');
+      setRememberPassword(false);
+    }
+    setSshRoot(savedConn.root || '/');
+    setError('');
+    setView('create');
+  };
+
+  // 断开连接
+  const disconnect = async () => {
+    if (activeConnection) {
+      await fetch(getServerUrl('/api/ssh/disconnect'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: activeConnection.id })
+      });
+    }
+    setActiveConnection(null);
+    setFiles([]);
+    setCurrentPath('/');
+    setSelectedFile(null);
+    setFileContent('');
+    setView('list');
+  };
+
+  // 列出文件
+  const listFiles = async (path: string, connId?: string) => {
+    const cid = connId || activeConnection?.id;
+    if (!cid) return;
+    setLoading(true);
+    setError('');  // 先清空错误
+    setFiles([]);  // 清空文件列表
+    setSelectedFile(null);  // 切换目录时移除右侧预览
+    setFileContent('');  // 清空文件内容
+    try {
+      const res = await fetch(getServerUrl('/api/ssh/ls'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: cid, path })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setFiles(data.files);
+        setCurrentPath(path);
+        setPathInput(path);  // 同步路径输入框
+        // 记录历史
+        const newHistory = pathHistory.slice(0, historyIndex + 1);
+        newHistory.push(path);
+        setPathHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+      } else {
+        setError(data.error || '读取目录失败');
+      }
+    } catch (e) {
+      setError('网络错误');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 读取文件
+  const readFile = async (file: SSHFile) => {
+    if (!activeConnection) return;
+    // 检查文件是否在当前文件列表中存在
+    const fileExists = files.some(f => f.path === file.path);
+    if (!fileExists) return;
+    setLoading(true);
+    setSelectedFile(file);
+    try {
+      const res = await fetch(getServerUrl('/api/ssh/read'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection_id: activeConnection.id, path: file.path })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setFileContent(data.content);
+      } else {
+        setError(data.error || '读取文件失败');
+      }
+    } catch (e) {
+      setError('网络错误');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 导航
+  const navigateTo = (file: SSHFile) => {
+    if (file.type === 'folder') {
+      listFiles(file.path);
+    } else {
+      readFile(file);
+    }
+  };
+
+  const goBack = () => {
+    if (historyIndex > 0) {
+      const newIndex = historyIndex - 1;
+      setHistoryIndex(newIndex);
+      listFiles(pathHistory[newIndex]);
+    }
+  };
+
+  const goForward = () => {
+    if (historyIndex < pathHistory.length - 1) {
+      const newIndex = historyIndex + 1;
+      setHistoryIndex(newIndex);
+      listFiles(pathHistory[newIndex]);
+    }
+  };
+
+  const formatSize = (bytes?: number) => {
+    if (!bytes) return '-';
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  };
+
+  const formatPath = (path: string) => {
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length <= 2) return path || '/';
+    return `.../${parts.slice(-2).join('/')}`;
+  };
+
+  // 跳转到指定路径
+  const navigateToPath = () => {
+    if (pathInput.trim() && activeConnection) {
+      // 确保路径以 / 开头
+      const normalizedPath = pathInput.trim().startsWith('/')
+        ? pathInput.trim()
+        : '/' + pathInput.trim();
+      listFiles(normalizedPath);
+    }
+  };
+
+  // ===== 视图1: 文件系统列表 =====
+  if (view === 'list') {
+    return (
+      <div>
+        <header className="page-header">
+          <div>
+            <h1 className="page-title">Files</h1>
+            <p className="page-subtitle">SSH/SFTP 文件系统</p>
+          </div>
+          {/* <button
+            onClick={() => {
+              setConnName('');
+              setSshHost('');
+              setSshPort(22);
+              setSshUsername('');
+              setSshPassword('');
+              setSshRoot('');
+              setRememberPassword(false);
+              setError('');
+              setView('create');
+            }}
+            className="icon-btn"
+            style={{ background: 'linear-gradient(135deg, #FF8E53, #FF6A00)', color: 'white' }}
+          >
+            <i className="fa-solid fa-plus"></i>
+          </button> */}
+        </header>
+
+        {savedConnections.length === 0 ? (
+          <div className="card" style={{ padding: '60px', textAlign: 'center' }}>
+            <i className="fa-solid fa-cloud" style={{ fontSize: '48px', color: '#FF8E53', marginBottom: '16px' }}></i>
+            <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px' }}>还没有文件系统</h3>
+            <p className="text-secondary" style={{ marginBottom: '20px' }}>点击按钮创建一个 SSH/SFTP 文件系统</p>
+            <button
+              onClick={() => {
+                setConnName('');
+                setSshHost('');
+                setSshPort(22);
+                setSshUsername('');
+                setSshPassword('');
+                setSshRoot('');
+                setRememberPassword(false);
+                setError('');
+                setView('create');
+              }}
+              style={{
+                padding: '10px 20px',
+                borderRadius: '10px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #FF8E53, #FF6A00)',
+                color: 'white',
+                fontSize: '13px',
+                cursor: 'pointer'
+              }}
+            >
+              创建文件系统
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+            {savedConnections.map((conn) => (
+              <div
+                key={conn.id}
+                className="card"
+                style={{ padding: '16px', cursor: 'pointer' }}
+                onClick={() => handleQuickConnect(conn)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                  <div style={{
+                    width: '40px', height: '40px', borderRadius: '10px',
+                    background: 'linear-gradient(135deg, #FF8E53, #FF6A00)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-server" style={{ color: 'white' }}></i>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: '14px', fontWeight: 600 }}>{conn.name}</div>
+                    <div style={{ fontSize: '12px', color: '#6B7280' }}>{conn.username}@{conn.host}:{conn.port}</div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleQuickConnect(conn);
+                    }}
+                    style={{
+                      flex: 1, padding: '8px', borderRadius: '8px', border: 'none',
+                      background: 'rgba(255, 142, 83, 0.1)', color: '#FF6A00',
+                      fontSize: '12px', cursor: 'pointer'
+                    }}
+                  >
+                    连接
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      confirmDelete(conn);
+                    }}
+                    style={{
+                      padding: '8px', borderRadius: '8px', border: 'none',
+                      background: 'rgba(239, 68, 68, 0.1)', color: '#EF4444',
+                      fontSize: '12px', cursor: 'pointer'
+                    }}
+                  >
+                    <i className="fa-solid fa-trash"></i>
+                  </button>
+                </div>
+              </div>
+            ))}
+            {/* 添加更多卡片 */}
+            <div
+              className="card"
+              style={{
+                padding: '16px', cursor: 'pointer', border: '2px dashed rgba(0,0,0,0.1)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                minHeight: '120px'
+              }}
+              onClick={() => {
+                setConnName('');
+                setSshHost('');
+                setSshPort(22);
+                setSshUsername('');
+                setSshPassword('');
+                setSshRoot('');
+                setRememberPassword(false);
+                setError('');
+                setView('create');
+              }}
+            >
+              <div style={{ textAlign: 'center', color: '#6B7280' }}>
+                <i className="fa-solid fa-plus" style={{ fontSize: '24px', marginBottom: '8px' }}></i>
+                <div style={{ fontSize: '13px' }}>添加更多</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 删除确认弹窗 */}
+        {showDeleteConfirm && connToDelete && (
+          <div style={{
+            position: 'fixed', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 1000, background: 'rgba(0,0,0,0.3)',
+            backdropFilter: 'blur(4px)'
+          }}>
+            <div className="card" style={{ padding: '24px', maxWidth: '360px', width: '90%' }}>
+              <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                <div style={{
+                  width: '56px', height: '56px', borderRadius: '50%',
+                  background: 'rgba(239, 68, 68, 0.1)', margin: '0 auto 16px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center'
+                }}>
+                  <i className="fa-solid fa-exclamation-triangle" style={{ fontSize: '24px', color: '#EF4444' }}></i>
+                </div>
+                <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px' }}>确认删除</h3>
+                <p style={{ fontSize: '13px', color: '#6B7280' }}>
+                  确定要删除服务器 <strong>{connToDelete.name}</strong> 吗？此操作不可恢复。
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button
+                  onClick={cancelDelete}
+                  style={{
+                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
+                    background: 'rgba(0,0,0,0.05)', color: '#6B7280',
+                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => deleteConnection(connToDelete.id)}
+                  style={{
+                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
+                    background: 'linear-gradient(135deg, #EF4444, #DC2626)', color: 'white',
+                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ===== 弹窗: 创建/连接文件系统 =====
+  if (view === 'create') {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 999
+      }}>
+        {/* 弹窗卡片 */}
+        <div style={{ width: '100%', maxWidth: '420px', margin: '20px' }}>
+          <div className="card" style={{ padding: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+              <h3 style={{ fontSize: '15px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <i className="fa-solid fa-server" style={{ color: '#FF8E53' }}></i>
+                {connName ? '编辑连接' : '新建连接'}
+              </h3>
+              <button
+                onClick={() => setView('list')}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280', fontSize: '18px' }}
+              >
+                <i className="fa-solid fa-times"></i>
+              </button>
+            </div>
+
+            {error && (
+              <div style={{ padding: '12px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '8px', color: '#EF4444', fontSize: '13px', marginBottom: '16px' }}>
+                {error}
+              </div>
+            )}
+
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '12px', color: '#6B7280', marginBottom: '6px' }}>连接名称（可选，最多20字符）</label>
+              <input
+                type="text"
+                value={connName}
+                onChange={(e) => setConnName(e.target.value)}
+                maxLength={20}
+                placeholder="例如: 生产服务器"
+                style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid rgba(0,0,0,0.1)', background: 'rgba(0,0,0,0.02)', fontSize: '13px', outline: 'none' }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '12px', color: '#6B7280', marginBottom: '6px' }}>服务器地址</label>
+              <input
+                type="text"
+                value={sshHost}
+                onChange={(e) => setSshHost(e.target.value)}
+                placeholder="例如: 192.168.1.100"
+                style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid rgba(0,0,0,0.1)', background: 'rgba(0,0,0,0.02)', fontSize: '13px', outline: 'none' }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '16px', display: 'flex', gap: '12px' }}>
+              <div style={{ flex: '0 0 80px' }}>
+                <label style={{ display: 'block', fontSize: '12px', color: '#6B7280', marginBottom: '6px' }}>端口</label>
+                <input
+                  type="number"
+                  value={sshPort}
+                  onChange={(e) => setSshPort(Number(e.target.value))}
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid rgba(0,0,0,0.1)', background: 'rgba(0,0,0,0.02)', fontSize: '13px', outline: 'none' }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '12px', color: '#6B7280', marginBottom: '6px' }}>用户名</label>
+                <input
+                  type="text"
+                  value={sshUsername}
+                  onChange={(e) => setSshUsername(e.target.value)}
+                  placeholder="root 或 ubuntu"
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', border: '1px solid rgba(0,0,0,0.1)', background: 'rgba(0,0,0,0.02)', fontSize: '13px', outline: 'none' }}
+                />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', fontSize: '12px', color: '#6B7280', marginBottom: '6px' }}>密码</label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={sshPassword}
+                  onChange={(e) => setSshPassword(e.target.value)}
+                  placeholder="SSH 密码"
+                  style={{ width: '100%', padding: '10px 40px 10px 14px', borderRadius: '10px', border: '1px solid rgba(0,0,0,0.1)', background: 'rgba(0,0,0,0.02)', fontSize: '13px', outline: 'none' }}
+                />
+                <button
+                  onClick={() => setShowPassword(!showPassword)}
+                  style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280' }}
+                >
+                  <i className={`fa-solid ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                </button>
+              </div>
+            </div>
+
+            {/* 记住密码选项 */}
+            <div style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: '13px', color: '#4B5563' }}>
+                <input
+                  type="checkbox"
+                  checked={rememberPassword}
+                  onChange={(e) => setRememberPassword(e.target.checked)}
+                  style={{ marginRight: '8px', width: '16px', height: '16px', cursor: 'pointer' }}
+                />
+                记住密码
+              </label>
+            </div>
+
+            {/* 根目录选择 */}
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', fontSize: '12px', color: '#6B7280', marginBottom: '6px' }}>绑定根目录</label>
+              <div style={{
+                padding: '10px 14px', borderRadius: '10px', border: '1px solid rgba(0,0,0,0.1)',
+                background: 'rgba(0,0,0,0.02)', display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+              }}>
+                <span style={{ fontSize: '13px', fontFamily: 'monospace', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {sshRoot || '点击选择根目录文件夹'}
+                </span>
+                <button
+                  onClick={openRootSelector}
+                  style={{
+                    padding: '6px 12px', borderRadius: '8px', border: 'none',
+                    background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                    color: 'white', fontSize: '12px', cursor: 'pointer', marginLeft: '8px'
+                  }}
+                >
+                  选择
+                </button>
+              </div>
+            </div>
+
+            <button
+              onClick={handleConnect}
+              disabled={loading || !sshRoot}
+              style={{
+                width: '100%', padding: '12px', borderRadius: '10px', border: 'none',
+                background: (loading || !sshRoot) ? '#ccc' : 'linear-gradient(135deg, #FF8E53, #FF6A00)',
+                color: 'white', fontSize: '14px', fontWeight: 500,
+                cursor: (loading || !sshRoot) ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+              }}
+            >
+              {loading ? (
+                <><span className="typing-dot"></span><span className="typing-dot"></span><span className="typing-dot"></span></>
+              ) : (
+                <><i className="fa-solid fa-plug"></i> 连接服务器</>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== 弹窗: 选择根目录 =====
+  if (view === 'selectRoot') {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 1000
+      }}>
+        <div style={{ width: '100%', maxWidth: '500px', margin: '20px' }}>
+          <div className="card" style={{ padding: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+              <h3 style={{ fontSize: '15px', fontWeight: 600 }}>
+                <i className="fa-solid fa-folder-open" style={{ color: '#FF8E53', marginRight: '8px' }}></i>
+                选择根目录
+              </h3>
+              <button
+                onClick={cancelSelectRoot}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280', fontSize: '18px' }}
+              >
+                <i className="fa-solid fa-times"></i>
+              </button>
+            </div>
+
+            {error && (
+              <div style={{ padding: '10px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '8px', color: '#EF4444', fontSize: '12px', marginBottom: '12px' }}>
+                {error}
+              </div>
+            )}
+
+            {!tempConnectionId ? (
+              // 步骤1: 连接远程服务器
+              <div style={{ textAlign: 'center', padding: '20px 0' }}>
+                <i className="fa-solid fa-server" style={{ fontSize: '40px', color: '#FF8E53', marginBottom: '16px' }}></i>
+                <p style={{ fontSize: '13px', color: '#6B7280', marginBottom: '20px' }}>
+                  需要先连接到服务器，才能浏览文件系统并选择根目录
+                </p>
+                <button
+                  onClick={async () => {
+                    const connId = await testAndConnectSSH();
+                    if (connId) {
+                      listRemoteFiles('/', connId);
+                    }
+                  }}
+                  disabled={loading || !sshHost || !sshUsername || !sshPassword}
+                  style={{
+                    padding: '12px 24px', borderRadius: '10px', border: 'none',
+                    background: (loading || !sshHost || !sshUsername || !sshPassword) ? '#ccc' : 'linear-gradient(135deg, #FF8E53, #FF6A00)',
+                    color: 'white', fontSize: '14px', cursor: (loading || !sshHost || !sshUsername || !sshPassword) ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {loading ? (
+                    <><span className="typing-dot"></span><span className="typing-dot"></span><span className="typing-dot"></span></>
+                  ) : (
+                    <><i className="fa-solid fa-plug"></i> 连接服务器并浏览</>
+                  )}
+                </button>
+              </div>
+            ) : (
+              // 步骤2: 浏览远程文件系统
+              <>
+                {/* 路径导航 */}
+                <div style={{
+                  padding: '8px 12px', borderRadius: '8px', background: 'rgba(0,0,0,0.02)',
+                  marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px'
+                }}>
+                  <button
+                    onClick={() => remoteGoBack(tempConnectionId)}
+                    disabled={remotePath === '/'}
+                    style={{
+                      padding: '4px 8px', borderRadius: '6px', border: 'none',
+                      background: remotePath === '/' ? 'rgba(0,0,0,0.05)' : 'rgba(255, 142, 83, 0.1)',
+                      color: remotePath === '/' ? '#9CA3AF' : '#FF6A00',
+                      cursor: remotePath === '/' ? 'not-allowed' : 'pointer', fontSize: '12px'
+                    }}
+                  >
+                    <i className="fa-solid fa-arrow-up"></i> 返回
+                  </button>
+                  <span style={{ fontSize: '12px', fontFamily: 'monospace', color: '#1F2937', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {remotePath}
+                  </span>
+                  <button
+                    onClick={() => listRemoteFiles(remotePath, tempConnectionId)}
+                    style={{ padding: '4px 8px', borderRadius: '6px', border: 'none', background: 'rgba(0,0,0,0.05)', cursor: 'pointer', fontSize: '12px' }}
+                  >
+                    <i className="fa-solid fa-sync-alt"></i>
+                  </button>
+                </div>
+
+                {/* 文件列表 */}
+                <div style={{ maxHeight: '300px', overflow: 'auto' }}>
+                  {loading ? (
+                    <div style={{ padding: '40px', textAlign: 'center' }}>
+                      <span className="typing-dot"></span>
+                      <span className="typing-dot"></span>
+                      <span className="typing-dot"></span>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      {remoteFiles.filter(f => f.type === 'folder').map((file, i) => (
+                        <div
+                          key={i}
+                          onClick={() => navigateRemote(file, tempConnectionId)}
+                          style={{
+                            padding: '10px 12px', borderRadius: '8px', cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: '10px',
+                            background: 'transparent', transition: 'all 0.15s'
+                          }}
+                          onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(255, 142, 83, 0.1)'}
+                          onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                        >
+                          <i className="fa-solid fa-folder" style={{ color: '#FF8E53', fontSize: '14px' }}></i>
+                          <span style={{ flex: 1, fontSize: '13px' }}>{file.name}</span>
+                          <i className="fa-solid fa-chevron-right" style={{ color: '#9CA3AF', fontSize: '12px' }}></i>
+                        </div>
+                      ))}
+                      {/* 可选择的根目录 - 当前文件夹 */}
+                      <div
+                        onClick={() => selectRemoteFolder({ name: '当前目录', type: 'folder', path: remotePath } as SSHFile, tempConnectionId)}
+                        style={{
+                          padding: '12px 12px', borderRadius: '8px', cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', gap: '10px',
+                          background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(16, 185, 129, 0.05))',
+                          border: '1px solid rgba(16, 185, 129, 0.2)',
+                          marginTop: '8px'
+                        }}
+                      >
+                        <i className="fa-solid fa-check-circle" style={{ color: '#10B981', fontSize: '14px' }}></i>
+                        <span style={{ flex: 1, fontSize: '13px', fontWeight: 500 }}>选择此文件夹作为根目录</span>
+                        <i className="fa-solid fa-level-up-alt" style={{ color: '#10B981', fontSize: '12px', transform: 'rotate(90deg)' }}></i>
+                      </div>
+                      {remoteFiles.filter(f => f.type === 'folder').length === 0 && (
+                        <div style={{ padding: '20px', textAlign: 'center', color: '#9CA3AF', fontSize: '13px' }}>
+                          此文件夹为空
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== 视图3: 浏览文件 =====
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <header className="page-header">
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button onClick={() => setView('list')} className="icon-btn">
+            <i className="fa-solid fa-arrow-left"></i>
+          </button>
+          <h1 className="page-title">{activeConnection?.name || 'SFTP'}</h1>
+          <span style={{ fontSize: '12px', padding: '4px 10px', background: 'rgba(16, 185, 129, 0.1)', borderRadius: '12px', color: '#10B981' }}>
+            {activeConnection?.username}@{activeConnection?.host}
+          </span>
+        </div>
+        <button onClick={disconnect} className="icon-btn" style={{ color: '#EF4444' }}>
+          <i className="fa-solid fa-plug"></i>
+        </button>
       </header>
-      <div className="card" style={{ padding: '60px', textAlign: 'center' }}>
-        <i className="fa-solid fa-folder-open" style={{ fontSize: '48px', color: '#FF8E53', marginBottom: '16px' }}></i>
-        <p className="text-secondary">File browser coming soon</p>
+
+      <div style={{ padding: '8px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <i className="fa-solid fa-folder" style={{ color: '#FF8E53', flexShrink: 0 }}></i>
+        <div style={{ flex: 1, position: 'relative' }}>
+          <input
+            type="text"
+            value={pathInput}
+            onChange={(e) => setPathInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && navigateToPath()}
+            placeholder="输入路径..."
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              borderRadius: '8px',
+              border: '1px solid rgba(0,0,0,0.1)',
+              background: 'rgba(0,0,0,0.02)',
+              fontSize: '13px',
+              fontFamily: 'monospace',
+              outline: 'none'
+            }}
+          />
+        </div>
+        <button
+          onClick={navigateToPath}
+          className="icon-btn"
+          style={{ flexShrink: 0 }}
+        >
+          <i className="fa-solid fa-arrow-right"></i>
+        </button>
+      </div>
+
+      <div style={{ flex: 1, display: 'flex', gap: '12px', overflow: 'hidden' }}>
+        <div className="card" style={{ flex: 1, padding: '12px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* 文件列表工具栏 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+            {/* 返回上一级 */}
+            <button
+              onClick={() => {
+                const parts = currentPath.split('/').filter(Boolean);
+                if (parts.length > 0) {
+                  parts.pop();
+                  const parent = parts.length === 0 ? '/' : '/' + parts.join('/');
+                  listFiles(parent);
+                }
+              }}
+              disabled={currentPath === '/'}
+              className="icon-btn"
+              style={{ opacity: currentPath === '/' ? 0.5 : 1, flexShrink: 0 }}
+              title="返回上一级"
+            >
+              <i className="fa-solid fa-arrow-up"></i>
+            </button>
+            {/* 刷新 */}
+            <button onClick={() => listFiles(currentPath)} className="icon-btn" style={{ flexShrink: 0 }} title="刷新">
+              <i className="fa-solid fa-sync-alt"></i>
+            </button>
+            {/* 搜索 */}
+            <div style={{ position: 'relative', flex: 1 }}>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索文件..."
+                style={{
+                  width: '100%',
+                  padding: '6px 12px 6px 28px',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(0,0,0,0.1)',
+                  background: 'rgba(0,0,0,0.02)',
+                  fontSize: '12px',
+                  outline: 'none'
+                }}
+              />
+              <i className="fa-solid fa-search" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#9CA3AF', fontSize: '11px' }}></i>
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  style={{ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: '#9CA3AF' }}
+                >
+                  <i className="fa-solid fa-times" style={{ fontSize: '10px' }}></i>
+                </button>
+              )}
+            </div>
+            {/* 排序 */}
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowSortMenu(!showSortMenu)}
+                className="icon-btn"
+                style={{ flexShrink: 0 }}
+                title="排序"
+              >
+                <i className="fa-solid fa-sort"></i>
+              </button>
+              {showSortMenu && (
+                <div style={{
+                  position: 'absolute', top: '100%', right: 0, marginTop: '4px',
+                  background: 'white', borderRadius: '8px', padding: '4px',
+                  boxShadow: '0 4px 20px rgba(0,0,0,0.15)', zIndex: 100,
+                  minWidth: '140px'
+                }}>
+                  {[
+                    { key: 'name', label: '名称' },
+                    { key: 'size', label: '大小' },
+                    { key: 'mtime', label: '修改时间' }
+                  ].map(field => (
+                    <div key={field.key}>
+                      <div style={{ padding: '6px 12px', fontSize: '11px', fontWeight: 500, color: '#6B7280', borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+                        {field.label}
+                      </div>
+                      <div style={{ display: 'flex' }}>
+                        <button
+                          onClick={() => { setSortField(field.key as any); setSortDirection('asc'); setShowSortMenu(false); }}
+                          style={{
+                            flex: 1, padding: '6px 12px', border: 'none', background: sortField === field.key && sortDirection === 'asc' ? 'rgba(255, 142, 83, 0.1)' : 'transparent',
+                            cursor: 'pointer', fontSize: '11px', color: sortField === field.key ? '#FF6A00' : '#6B7280'
+                          }}
+                        >
+                          <i className="fa-solid fa-arrow-up" style={{ marginRight: '4px', fontSize: '10px' }}></i>升序
+                        </button>
+                        <button
+                          onClick={() => { setSortField(field.key as any); setSortDirection('desc'); setShowSortMenu(false); }}
+                          style={{
+                            flex: 1, padding: '6px 12px', border: 'none', background: sortField === field.key && sortDirection === 'desc' ? 'rgba(255, 142, 83, 0.1)' : 'transparent',
+                            cursor: 'pointer', fontSize: '11px', color: sortField === field.key ? '#FF6A00' : '#6B7280'
+                          }}
+                        >
+                          <i className="fa-solid fa-arrow-down" style={{ marginRight: '4px', fontSize: '10px' }}></i>降序
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ padding: '10px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '8px', color: '#EF4444', fontSize: '12px', marginBottom: '12px' }}>
+              {error}
+            </div>
+          )}
+          {loading ? (
+            <div style={{ padding: '40px', textAlign: 'center', color: '#6B7280', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <i className="fa-solid fa-spinner fa-spin" style={{ fontSize: '20px', marginBottom: '8px' }}></i>
+              <p style={{ fontSize: '12px', margin: 0 }}>加载中...</p>
+            </div>
+          ) : (() => {
+            // 过滤和排序
+            const filteredFiles = files
+              .filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()))
+              .sort((a, b) => {
+                let cmp = 0;
+                if (sortField === 'name') {
+                  cmp = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+                } else if (sortField === 'size') {
+                  cmp = (a.size || 0) - (b.size || 0);
+                } else if (sortField === 'mtime') {
+                  cmp = (a.mtime || 0) - (b.mtime || 0);
+                }
+                return sortDirection === 'asc' ? cmp : -cmp;
+              });
+
+            if (filteredFiles.length === 0) {
+              return (
+                <div style={{ padding: '40px', textAlign: 'center', color: '#6B7280', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <i className="fa-regular fa-folder-open" style={{ fontSize: '24px', marginBottom: '8px' }}></i>
+                  <p style={{ fontSize: '12px', margin: 0 }}>{searchQuery ? '未找到匹配的文件' : '该目录为空'}</p>
+                </div>
+              );
+            }
+
+            return (
+              <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  {filteredFiles.map((file, i) => (
+                    <div
+                      key={i}
+                      onClick={() => navigateTo(file)}
+                      style={{
+                        padding: '10px 12px', borderRadius: '8px', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: '10px',
+                        background: selectedFile?.path === file.path ? 'rgba(255, 142, 83, 0.15)' : 'transparent',
+                        transition: 'all 0.15s'
+                      }}
+                    >
+                      <i className={`fa-solid ${file.type === 'folder' ? 'fa-folder' : 'fa-file-code'}`}
+                         style={{ color: file.type === 'folder' ? '#FF8E53' : '#6B7280', fontSize: '14px' }}></i>
+                      <span style={{ flex: 1, fontSize: '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>
+                      <span style={{ fontSize: '11px', color: '#9CA3AF', minWidth: '70px', textAlign: 'right' }}>{formatSize(file.size)}</span>
+                      <span style={{ fontSize: '11px', color: '#9CA3AF', minWidth: '85px', textAlign: 'right' }}>{file.mtime ? new Date(file.mtime * 1000).toLocaleDateString() : '-'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
+        {selectedFile && (
+          <div className="card" style={{ flex: 2, padding: '16px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <i className="fa-solid fa-file-code" style={{ color: '#6B48AA' }}></i>
+                <span style={{ fontSize: '13px', fontWeight: 500 }}>{selectedFile.name}</span>
+              </div>
+              <button onClick={() => { setSelectedFile(null); setFileContent(''); }} className="icon-btn" style={{ width: '28px', height: '28px' }}>
+                <i className="fa-solid fa-times" style={{ fontSize: '12px' }}></i>
+              </button>
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', background: '#1e1e1e', borderRadius: '8px', padding: '12px' }}>
+              <pre style={{ margin: 0, fontFamily: 'monospace', fontSize: '12px', lineHeight: '1.5', color: '#d4d4d4' }}>{fileContent || '读取中...'}</pre>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -761,6 +3700,10 @@ function SettingsView() {
   const [speedTestResults, setSpeedTestResults] = useState<Record<string, SpeedTestResult>>({});
   const [speedTesting, setSpeedTesting] = useState<Set<string>>(new Set());
   const [showApiKeyPassword, setShowApiKeyPassword] = useState(false);
+
+  // 删除确认弹窗状态
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [configToDelete, setConfigToDelete] = useState<string | null>(null);
 
   // 测速结果类型
   type SpeedTestResult = {
@@ -1117,6 +4060,29 @@ function SettingsView() {
       setModelConfigs(prev => [...prev, newConfig]);
       showToast('复制成功', 'success');
     }
+  };
+
+  // 确认删除配置
+  const confirmDeleteConfig = (configId: string) => {
+    setConfigToDelete(configId);
+    setShowDeleteConfirm(true);
+  };
+
+  // 执行删除配置
+  const deleteConfig = () => {
+    if (configToDelete) {
+      const newConfigs = modelConfigs.filter(c => c.id !== configToDelete);
+      setModelConfigs(newConfigs);
+      showToast('删除成功', 'success');
+    }
+    setShowDeleteConfirm(false);
+    setConfigToDelete(null);
+  };
+
+  // 取消删除
+  const cancelDeleteConfig = () => {
+    setShowDeleteConfirm(false);
+    setConfigToDelete(null);
   };
 
   // 新建配置 - 显示 API 配置内容
@@ -1576,10 +4542,7 @@ function SettingsView() {
                           <i className="fa-solid fa-pencil"></i>
                         </button>
                         <button
-                          onClick={() => {
-                            const newConfigs = modelConfigs.filter(c => c.id !== config.id);
-                            setModelConfigs(newConfigs);
-                          }}
+                          onClick={() => confirmDeleteConfig(config.id)}
                           style={{
                             padding: '8px',
                             background: 'transparent',
@@ -2126,6 +5089,58 @@ function SettingsView() {
           </div>
         </div>
       )}
+
+      {/* 删除确认弹窗 */}
+      {showDeleteConfirm && configToDelete && (() => {
+        const config = modelConfigs.find(c => c.id === configToDelete);
+        if (!config) return null;
+        return (
+          <div style={{
+            position: 'fixed', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 1000, background: 'rgba(0,0,0,0.3)',
+            backdropFilter: 'blur(4px)'
+          }}>
+            <div className="card" style={{ padding: '24px', maxWidth: '360px', width: '90%' }}>
+              <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                <div style={{
+                  width: '56px', height: '56px', borderRadius: '50%',
+                  background: 'rgba(239, 68, 68, 0.1)', margin: '0 auto 16px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center'
+                }}>
+                  <i className="fa-solid fa-exclamation-triangle" style={{ fontSize: '24px', color: '#EF4444' }}></i>
+                </div>
+                <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px' }}>确认删除</h3>
+                <p style={{ fontSize: '13px', color: '#6B7280' }}>
+                  确定要删除模型配置 <strong>{config.name}</strong> 吗？此操作不可恢复。
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button
+                  onClick={cancelDeleteConfig}
+                  style={{
+                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
+                    background: 'rgba(0,0,0,0.05)', color: '#6B7280',
+                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  onClick={deleteConfig}
+                  style={{
+                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
+                    background: 'linear-gradient(135deg, #EF4444, #DC2626)', color: 'white',
+                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2759,6 +5774,7 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
           </div>
         </div>
       </div>
+
     </>
   );
 }
