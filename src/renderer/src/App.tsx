@@ -184,6 +184,7 @@ function App() {
     { id: 'workspace', icon: 'fa-th' },
     { id: 'files', icon: 'fa-folder' },
     { id: 'secrets', icon: 'fa-key' },
+    { id: 'email', icon: 'fa-envelope' },
     { id: 'tasks', icon: 'fa-check-square' },
     { id: 'calendar', icon: 'fa-calendar' },
     { id: 'ai', icon: 'fa-robot' },

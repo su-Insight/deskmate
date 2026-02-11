@@ -74,8 +74,47 @@ class DatabaseManager:
             conn.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at INTEGER, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)")
             conn.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status INTEGER DEFAULT 0, priority INTEGER DEFAULT 1, due_date INTEGER, created_at INTEGER, updated_at INTEGER)")
             conn.execute("CREATE TABLE IF NOT EXISTS ai_config (config_key TEXT PRIMARY KEY, config_value TEXT, config_type TEXT, description TEXT, updated_at INTEGER)")
-            
-            # 初始化默认配置
+
+            # 邮箱账户表
+            conn.execute("""CREATE TABLE IF NOT EXISTS email_accounts (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                imap_host TEXT NOT NULL,
+                smtp_host TEXT NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                imap_port INTEGER DEFAULT 993,
+                smtp_port INTEGER DEFAULT 465,
+                created_at INTEGER,
+                updated_at INTEGER
+            )""")
+
+            # 邮箱邮件表
+            conn.execute("""CREATE TABLE IF NOT EXISTS email_messages (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                uid TEXT NOT NULL,
+                subject TEXT,
+                sender TEXT,
+                sender_email TEXT,
+                from_raw TEXT,
+                recipients TEXT,
+                date TEXT,
+                body TEXT,
+                body_html TEXT,
+                is_read INTEGER DEFAULT 0,
+                folder TEXT DEFAULT 'INBOX',
+                fetched_at INTEGER,
+                FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE,
+                UNIQUE(account_id, uid)
+            )""")
+
+            # 添加 from_raw 列（如果不存在）
+            try:
+                conn.execute("ALTER TABLE email_messages ADD COLUMN from_raw TEXT")
+            except:
+                pass
             defaults = [
                 ('api_key', '', 'secret', 'API密钥'),
                 ('base_url', 'https://api.openai.com/v1', 'string', 'API地址'),
@@ -607,7 +646,8 @@ def extract_icons(target_url):
                 elif href.startswith('//'):
                     final_url = 'https:' + href
                 else:
-                    final_url = urljoin(base_url, href)
+                    cur_url = response.url
+                    final_url = urljoin(str(cur_url), href)
 
                 icons.append({
                     'type': link.get('type', 'unknown'),
@@ -669,27 +709,835 @@ def select_best_icon(icon_list):
 @app.route('/api/icons/extract', methods=['POST'])
 def get_website_icon():
     """获取网站图标 API"""
-    data = request.get_json() or {}
-    website = data.get('website', '').strip()
+    try:
+        data = request.get_json() or {}
+        website = data.get('website', '').strip()
 
-    if not website:
-        return jsonify({'success': False, 'error': '网站地址不能为空'}), 400
+        if not website:
+            return jsonify({'success': False, 'error': '网站地址不能为空'}), 400
 
-    # 确保 URL 有协议头
-    if not website.startswith(('http://', 'https://')):
-        website = 'https://' + website
+        # 确保 URL 有协议头
+        if not website.startswith(('http://', 'https://')):
+            website = 'https://' + website
 
-    icons = extract_icons(website)
+        print(f"[图标获取] 正在请求: {website}")
+        icons = extract_icons(website)
+        print(f"[图标获取] 找到 {len(icons)} 个图标")
 
-    if not icons:
-        return jsonify({'success': True, 'icon_url': None, 'message': '未找到图标，使用默认'})
+        if not icons:
+            return jsonify({'success': True, 'icon_url': None, 'message': '未找到图标'})
 
-    best = select_best_icon(icons)
+        best = select_best_icon(icons)
+        print(f"[图标获取] 选择最佳图标: {best['url'] if best else 'None'}")
+
+        return jsonify({
+            'success': True,
+            'icon_url': best['url'] if best else None,
+            'all_icons': icons
+        })
+
+    except Exception as e:
+        print(f"[图标获取] 错误: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================
+# 邮箱系统 API
+# ============================================
+
+# 邮箱提供商配置
+EMAIL_PROVIDERS = {
+    'gmail': {
+        'name': 'Gmail',
+        'imap_host': 'imap.gmail.com',
+        'smtp_host': 'smtp.gmail.com',
+        'imap_port': 993,
+        'smtp_port': 465,
+        'icon': 'https://www.google.com/favicon.ico'
+    },
+    'outlook': {
+        'name': 'Outlook',
+        'imap_host': 'imap-mail.outlook.com',
+        'smtp_host': 'smtp-mail.outlook.com',
+        'imap_port': 993,
+        'smtp_port': 587,
+        'icon': 'https://www.microsoft.com/favicon.ico'
+    },
+    'qq': {
+        'name': 'QQ邮箱',
+        'imap_host': 'imap.qq.com',
+        'smtp_host': 'smtp.qq.com',
+        'imap_port': 993,
+        'smtp_port': 465,
+        'icon': 'https://mail.qq.com/favicon.ico'
+    },
+    '163': {
+        'name': '163邮箱',
+        'imap_host': 'imap.163.com',
+        'smtp_host': 'smtp.163.com',
+        'imap_port': 993,
+        'smtp_port': 465,
+        'icon': 'https://www.163.com/favicon.ico'
+    },
+    'yahoo': {
+        'name': 'Yahoo',
+        'imap_host': 'imap.mail.yahoo.com',
+        'smtp_host': 'smtp.mail.yahoo.com',
+        'imap_port': 993,
+        'smtp_port': 587,
+        'icon': 'https://www.yahoo.com/favicon.ico'
+    },
+    'icloud': {
+        'name': 'iCloud',
+        'imap_host': 'imap.mail.me.com',
+        'smtp_host': 'smtp.mail.me.com',
+        'imap_port': 993,
+        'smtp_port': 587,
+        'icon': 'https://www.icloud.com/favicon.ico'
+    }
+}
+
+
+def get_imap_connection(account):
+    """创建 IMAP 连接"""
+    import imaplib
+    import ssl
+
+    context = ssl.create_default_context()
+    try:
+        if account['imap_port'] == 993:
+            conn = imaplib.IMAP4_SSL(account['imap_host'], account['imap_port'], ssl_context=context)
+        else:
+            conn = imaplib.IMAP4(account['imap_host'], account['imap_port'])
+        conn.login(account['username'], account['password'])
+        return conn
+    except Exception as e:
+        print(f"[IMAP] 连接失败: {e}")
+        raise e
+
+
+@app.route('/api/email/providers', methods=['GET'])
+def get_email_providers():
+    """获取支持的邮箱提供商列表"""
     return jsonify({
         'success': True,
-        'icon_url': best['url'] if best else None,
-        'all_icons': icons
+        'providers': [
+            {'id': k, 'name': v['name'], 'icon': v['icon']}
+            for k, v in EMAIL_PROVIDERS.items()
+        ]
     })
+
+
+@app.route('/api/email/accounts', methods=['GET'])
+def get_email_accounts():
+    """获取所有已绑定的邮箱账户"""
+    try:
+        with db.get_connection() as conn:
+            accounts = conn.execute(
+                "SELECT id, email, provider, created_at FROM email_accounts ORDER BY created_at DESC"
+            ).fetchall()
+
+        # 获取每个账户的未读邮件数
+        result = []
+        for acc in accounts:
+            with db.get_connection() as conn:
+                unread = conn.execute(
+                    "SELECT COUNT(*) as count FROM email_messages WHERE account_id = ? AND is_read = 0",
+                    (acc['id'],)
+                ).fetchone()
+
+            result.append({
+                'id': acc['id'],
+                'email': acc['email'],
+                'provider': acc['provider'],
+                'unread_count': unread['count'] if unread else 0,
+                'created_at': acc['created_at']
+            })
+
+        return jsonify({'success': True, 'accounts': result})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts', methods=['POST'])
+def add_email_account():
+    """添加邮箱账户"""
+    try:
+        data = request.get_json() or {}
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '').strip()
+        provider = data.get('provider', '').strip()
+
+        if not email or not password or not provider:
+            return jsonify({'success': False, 'error': '请填写完整信息'}), 400
+
+        if provider not in EMAIL_PROVIDERS:
+            return jsonify({'success': False, 'error': '不支持的邮箱提供商'}), 400
+
+        provider_config = EMAIL_PROVIDERS[provider]
+
+        # 创建账户ID
+        account_id = str(uuid.uuid4())
+        now = int(datetime.now().timestamp())
+
+        # QQ邮箱用户名处理：去掉 @qq.com 后缀
+        if provider == 'qq':
+            username = email.split('@')[0]
+        else:
+            username = email
+
+        # 尝试连接验证
+        try:
+            test_account = {
+                'imap_host': provider_config['imap_host'],
+                'imap_port': provider_config['imap_port'],
+                'username': username,
+                'password': password
+            }
+            print(f"[IMAP] 尝试连接 {provider}: {username}@{provider_config['imap_host']}:{provider_config['imap_port']}")
+            conn = get_imap_connection(test_account)
+            print(f"[IMAP] 连接成功")
+            conn.logout()
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[IMAP] 连接失败: {error_msg}")
+
+            # QQ邮箱特殊错误处理（优先检测）
+            if provider == 'qq' and 'Account is abnormal' in error_msg:
+                return jsonify({
+                    'success': False,
+                    'error': 'QQ邮箱账户异常。请登录 mail.qq.com 检查：\n\n1. 账户是否被冻结或限制\n2. IMAP/SMTP服务是否已开启\n3. 登录频率是否过高\n\n建议：\n- 稍等几分钟后再试\n- 检查是否已开启 IMAP/SMTP 服务\n- 确认授权码正确（不是QQ密码）'
+                }), 401
+
+            if 'LOGIN' in error_msg or 'authentication' in error_msg.lower():
+                if provider == 'gmail':
+                    hint = 'Gmail 登录失败。请确保：1) 已开启 IMAP 访问；2) 使用应用专用密码而非登录密码'
+                elif provider == 'qq':
+                    hint = 'QQ邮箱登录失败。\n\n解决方法：\n1. 登录 QQ 邮箱网页版 (mail.qq.com)\n2. 点击设置 → 账户 → 开启 IMAP/SMTP 服务\n3. 生成授权码（注意：不是 QQ 密码！）\n4. 使用授权码作为密码登录'
+                elif provider == '163':
+                    hint = '163邮箱登录失败。请确保已开启 IMAP 服务，并使用授权码'
+                elif provider == 'outlook':
+                    hint = 'Outlook 登录失败。请使用 Microsoft 账户密码或应用专用密码'
+                else:
+                    hint = '请检查邮箱地址和密码/授权码是否正确'
+                return jsonify({'success': False, 'error': hint}), 401
+
+            return jsonify({'success': False, 'error': f'连接失败: {error_msg}'}), 401
+
+        # 保存到数据库
+        with db.get_connection() as conn:
+            conn.execute("""
+                INSERT INTO email_accounts
+                (id, email, provider, imap_host, smtp_host, username, password, imap_port, smtp_port, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                account_id, email, provider,
+                provider_config['imap_host'], provider_config['smtp_host'],
+                username, password,
+                provider_config['imap_port'], provider_config['smtp_port'],
+                now, now
+            ))
+
+        return jsonify({'success': True, 'account_id': account_id, 'email': email})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>', methods=['GET'])
+def get_email_account(account_id):
+    """获取单个邮箱账户详情（包括密码）"""
+    try:
+        with db.get_connection() as conn:
+            acc = conn.execute(
+                "SELECT id, email, provider, username, password, imap_host, imap_port, smtp_host, smtp_port FROM email_accounts WHERE id = ?",
+                (account_id,)
+            ).fetchone()
+
+        if not acc:
+            return jsonify({'success': False, 'error': '账户不存在'}), 404
+
+        return jsonify({
+            'success': True,
+            'account': {
+                'id': acc['id'],
+                'email': acc['email'],
+                'provider': acc['provider'],
+                'username': acc['username'],
+                'password': acc['password'],
+                'imap_host': acc['imap_host'],
+                'imap_port': acc['imap_port'],
+                'smtp_host': acc['smtp_host'],
+                'smtp_port': acc['smtp_port']
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>', methods=['DELETE'])
+def delete_email_account(account_id):
+    """删除邮箱账户"""
+    try:
+        with db.get_connection() as conn:
+            conn.execute("DELETE FROM email_messages WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM email_accounts WHERE id = ?", (account_id,))
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>', methods=['PUT'])
+def update_email_account(account_id):
+    """更新邮箱账户"""
+    try:
+        data = request.get_json() or {}
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '').strip()  # 可选，留空则不更新密码
+        provider = data.get('provider', '').strip()
+
+        if not email or not provider:
+            return jsonify({'success': False, 'error': '邮箱地址和提供商不能为空'}), 400
+
+        if provider not in EMAIL_PROVIDERS:
+            return jsonify({'success': False, 'error': '不支持的邮箱提供商'}), 400
+
+        provider_config = EMAIL_PROVIDERS[provider]
+
+        # QQ邮箱用户名处理：去掉 @qq.com 后缀
+        if provider == 'qq':
+            username = email.split('@')[0]
+        else:
+            username = email
+
+        # 获取原账户信息
+        with db.get_connection() as conn:
+            old_account = conn.execute(
+                "SELECT * FROM email_accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+
+        if not old_account:
+            return jsonify({'success': False, 'error': '账户不存在'}), 404
+
+        # 如果提供了新密码，需要验证密码是否正确
+        if password:
+            try:
+                test_account = {
+                    'imap_host': provider_config['imap_host'],
+                    'imap_port': provider_config['imap_port'],
+                    'username': username,
+                    'password': password
+                }
+                conn = get_imap_connection(test_account)
+                conn.logout()
+            except Exception as e:
+                error_msg = str(e)
+                if 'LOGIN' in error_msg or 'authentication' in error_msg.lower():
+                    return jsonify({'success': False, 'error': '密码验证失败，请检查新密码是否正确'}), 401
+                return jsonify({'success': False, 'error': f'连接验证失败: {error_msg}'}), 401
+
+        # 更新数据库
+        now = int(datetime.now().timestamp())
+        with db.get_connection() as conn:
+            if password:
+                conn.execute("""
+                    UPDATE email_accounts
+                    SET email = ?, provider = ?, imap_host = ?, smtp_host = ?,
+                        username = ?, password = ?, imap_port = ?, smtp_port = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                """, (
+                    email, provider,
+                    provider_config['imap_host'], provider_config['smtp_host'],
+                    username, password,
+                    provider_config['imap_port'], provider_config['smtp_port'],
+                    now, account_id
+                ))
+            else:
+                # 不更新密码
+                conn.execute("""
+                    UPDATE email_accounts
+                    SET email = ?, provider = ?, imap_host = ?, smtp_host = ?,
+                        username = ?, imap_port = ?, smtp_port = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                """, (
+                    email, provider,
+                    provider_config['imap_host'], provider_config['smtp_host'],
+                    username,
+                    provider_config['imap_port'], provider_config['smtp_port'],
+                    now, account_id
+                ))
+
+        return jsonify({'success': True, 'email': email})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/sync', methods=['POST'])
+def sync_email_messages(account_id):
+    """同步邮件 - 获取未读邮件 (修正版：增强解析与附件处理)"""
+    import imaplib
+    import ssl
+    import email
+    import re
+    import json
+    import uuid
+    from email.header import decode_header
+    from datetime import datetime
+
+    # --- 内部辅助函数：通用解码 ---
+    def decode_str(header_value):
+        """解析邮件头部的编码 (如 =?utf-8?b?...)"""
+        if not header_value:
+            return ''
+        try:
+            # decode_header 返回一个列表 [(decoded_string, charset), ...]
+            decoded_list = decode_header(header_value)
+            parts = []
+            for content, encoding in decoded_list:
+                if isinstance(content, bytes):
+                    if encoding:
+                        try:
+                            parts.append(content.decode(encoding))
+                        except:
+                            # 常见备用编码尝试
+                            try: parts.append(content.decode('utf-8'))
+                            except: parts.append(content.decode('gbk', errors='ignore'))
+                    else:
+                        # 无编码标识，默认尝试 utf-8
+                        parts.append(content.decode('utf-8', errors='ignore'))
+                else:
+                    parts.append(str(content))
+            return ''.join(parts).strip()
+        except Exception:
+            return str(header_value)
+
+    try:
+        # 1. 获取账户信息
+        with db.get_connection() as conn:
+            account = conn.execute(
+                "SELECT * FROM email_accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+
+        if not account:
+            return jsonify({'success': False, 'error': '账户不存在'}), 404
+
+        print(f"[邮件同步] 开始同步: {account['email']}")
+
+        # 2. 连接 IMAP
+        ctx = ssl.create_default_context()
+        try:
+            if account['imap_port'] == 993:
+                imap_conn = imaplib.IMAP4_SSL(account['imap_host'], account['imap_port'], ssl_context=ctx)
+            else:
+                imap_conn = imaplib.IMAP4(account['imap_host'], account['imap_port'])
+            
+            # 登录处理
+            login_username = account['username']
+            if account['provider'] == 'qq' and '@' in login_username:
+                login_username = login_username.split('@')[0]
+            
+            imap_conn.login(login_username, account['password'])
+            
+            # 163 必须的 ID 命令
+            if '163.com' in account['imap_host'] or account['provider'] == '163':
+                try:
+                    imaplib.Commands['ID'] = ('AUTH', 'SELECTED')
+                    args = ("name", "client", "version", "1.0.0")
+                    imap_conn._simple_command('ID', '("' + '" "'.join(args) + '")')
+                except Exception: pass
+
+            imap_conn.select('INBOX', readonly=True)
+
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'连接/登录失败: {str(e)}'}), 500
+
+        # 3. 搜索邮件
+        # 建议：为了性能，先搜索 UNSEEN，如果需要更多再逻辑扩展。这里为了演示获取内容，使用 ALL 并取最后 20 封
+        email_ids = []
+        try:
+            # status, messages = imap_conn.search(None, 'UNSEEN') # 只抓未读
+            status, messages = imap_conn.search(None, 'ALL')    # 抓取所有(用于测试)
+            if status == 'OK':
+                all_ids = messages[0].split()
+                email_ids = all_ids[-20:] if all_ids else [] # 只取最新的 20 封，防止超时
+        except Exception as e:
+            print(f"[邮件同步] 搜索失败: {e}")
+
+        fetched_count = 0
+        now = int(datetime.now().timestamp())
+
+        if email_ids:
+            print(f"[邮件同步] 准备处理 {len(email_ids)} 封邮件...")
+
+        # 倒序遍历，优先处理最新邮件
+        for email_id in reversed(email_ids):
+            try:
+                status, msg_data = imap_conn.fetch(email_id, '(RFC822)')
+                if status != 'OK': continue
+
+                raw_email = msg_data[0][1]
+                msg = email.message_from_bytes(raw_email)
+
+                # === A. 解析头部信息 ===
+                subject = decode_str(msg.get('Subject', '无主题'))
+                from_raw = msg.get('From', '')
+
+                from_decoded = decode_str(from_raw)
+                
+                # 提取纯邮箱地址 <xxx@xxx.com> -> xxx@xxx.com
+                sender_email = ''
+                match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9._%+-]+)', from_raw)
+                if match: 
+                    sender_email = match.group(1)
+                
+                date = msg.get('date', '')
+
+                # === B. 解析内容 (正文 + 附件) ===
+                body = ''
+                body_html = ''
+                attachments = []
+
+                # 使用 walk 遍历所有部分
+                for part in msg.walk():
+                    if part.is_multipart():
+                        continue
+
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get('Content-Disposition', ''))
+                    filename = part.get_filename()
+
+                    # --- 1. 处理附件 ---
+                    if filename or 'attachment' in content_disposition:
+                        if filename:
+                            # 解码文件名
+                            fname = decode_str(filename)
+                            # 获取附件大小 (不建议直接存附件内容到DB，只存元数据)
+                            payload = part.get_payload(decode=True)
+                            fsize = len(payload) if payload else 0
+                            
+                            attachments.append({
+                                'filename': fname,
+                                'size': fsize,
+                                'content_type': content_type
+                            })
+                            print(f"    [附件] 发现: {fname}")
+                        continue # 是附件，跳过正文处理
+
+                    # --- 2. 处理正文 ---
+                    try:
+                        payload = part.get_payload(decode=True)
+                        if not payload: continue
+
+                        # 获取字符集，默认 utf-8
+                        charset = part.get_content_charset()
+                        
+                        # 尝试解码
+                        content = ""
+                        try:
+                            if charset:
+                                content = payload.decode(charset, errors='replace')
+                            else:
+                                content = payload.decode('utf-8', errors='replace')
+                        except:
+                            # 最后尝试 GBK
+                            content = payload.decode('gbk', errors='replace')
+
+                        # 分类存储
+                        if content_type == 'text/html':
+                            body_html += content
+                        elif content_type == 'text/plain':
+                            body += content
+                            
+                    except Exception as parse_err:
+                        print(f"    [解析错误] 正文解码失败: {parse_err}")
+
+                # === C. 存入数据库 ===
+                uid_str = str(email_id.decode())
+                msg_uuid = str(uuid.uuid4())
+
+                # 打印结果概览
+                print(f"[处理中] {subject[:20]} | TXT: {len(body)} | HTML: {len(body_html)} | 附件: {len(attachments)}")
+
+                with db.get_connection() as db_conn:
+                    # 关键修改：先删除旧记录 (防止 INSERT OR IGNORE 导致内容无法更新)
+                    # 假设我们通过 account_id 和 uid (邮件服务器ID) 唯一确定一封邮件
+                    db_conn.execute(
+                        "DELETE FROM email_messages WHERE account_id = ? AND uid = ?", 
+                        (account_id, uid_str)
+                    )
+
+                    # 插入新记录
+                    # 注意：需要确保数据库表有 attachments 字段。如果没有，请先执行 ALTER TABLE
+                    db_conn.execute("""
+                        INSERT INTO email_messages
+                        (id, account_id, uid, subject, sender, sender_email, from_raw, 
+                         recipients, date, body, body_html, attachments, is_read, folder, fetched_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'INBOX', ?)
+                    """, (
+                        msg_uuid, account_id, uid_str,
+                        subject, from_decoded, sender_email, from_raw,
+                        msg.get('to', ''), date,
+                        body[:20000],          # 限制长度防止数据库报错
+                        body_html[:50000],     # 限制长度
+                        json.dumps(attachments), # 将附件列表转为 JSON 字符串存储
+                        now
+                    ))
+                    fetched_count += 1
+
+            except Exception as e:
+                print(f"[邮件同步] 单封处理异常: {e}")
+                continue
+
+        imap_conn.logout()
+        print(f"[邮件同步] 完成，处理了 {fetched_count} 封邮件")
+
+        # 返回未读数
+        with db.get_connection() as conn:
+            unread = conn.execute(
+                "SELECT COUNT(*) as count FROM email_messages WHERE account_id = ? AND is_read = 0",
+                (account_id,)
+            ).fetchone()
+
+        return jsonify({
+            'success': True,
+            'fetched': fetched_count,
+            'unread_count': unread['count'] if unread else 0
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/messages', methods=['GET'])
+def get_email_messages(account_id):
+    """获取邮件列表"""
+    try:
+        unread_only = request.args.get('unread_only', 'false') == 'true'
+
+        with db.get_connection() as conn:
+            account = conn.execute(
+                "SELECT email, provider FROM email_accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+
+        if not account:
+            return jsonify({'success': False, 'error': '账户不存在'}), 404
+
+        query = "SELECT * FROM email_messages WHERE account_id = ?"
+        params = [account_id]
+
+        if unread_only:
+            query += " AND is_read = 0"
+
+        query += " ORDER BY fetched_at DESC LIMIT 100"
+
+        with db.get_connection() as conn:
+            messages = conn.execute(query, params).fetchall()
+            print(messages)
+
+        result = []
+        for msg in messages:
+            result.append({
+                'id': msg['id'],
+                'subject': msg['subject'],
+                'sender': msg['sender'],
+                'sender_email': msg['sender_email'],
+                'date': msg['date'],
+                'is_read': msg['is_read'],
+                'has_body': bool(msg['body'] or msg['body_html']),
+            })
+
+        return jsonify({
+            'success': True,
+            'account': {'email': account['email'], 'provider': account['provider']},
+            'messages': result
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/messages/<msg_id>', methods=['GET'])
+def get_email_message_detail(account_id, msg_id):
+    """获取邮件详情"""
+    try:
+        with db.get_connection() as conn:
+            msg = conn.execute(
+                "SELECT * FROM email_messages WHERE id = ? AND account_id = ?",
+                (msg_id, account_id)
+            ).fetchone()
+
+        if not msg:
+            return jsonify({'success': False, 'error': '邮件不存在'}), 404
+
+        return jsonify({
+            'success': True,
+            'message': {
+                'id': msg['id'],
+                'subject': msg['subject'],
+                'sender': msg['sender'],
+                'sender_email': msg['sender_email'],
+                'recipients': msg['recipients'],
+                'date': msg['date'],
+                'body': msg['body'],
+                'body_html': msg['body_html'],
+                'is_read': msg['is_read']
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/mark-read', methods=['POST'])
+def mark_all_as_read(account_id):
+    """一键已读 - 同步到服务器"""
+    try:
+        # 获取账户信息
+        with db.get_connection() as conn:
+            account = conn.execute(
+                "SELECT * FROM email_accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+
+        if not account:
+            return jsonify({'success': False, 'error': '账户不存在'}), 404
+
+        # 连接到 IMAP 并标记所有未读邮件为已读
+        try:
+            import imaplib
+            import ssl
+
+            ctx = ssl.create_default_context()
+            if account['imap_port'] == 993:
+                imap_conn = imaplib.IMAP4_SSL(account['imap_host'], account['imap_port'], ssl_context=ctx)
+            else:
+                imap_conn = imaplib.IMAP4(account['imap_host'], account['imap_port'])
+
+            # 登录
+            imap_conn.login(account['username'], account['password'])
+
+            # 选择邮箱文件夹
+            try:
+                imap_conn.select('INBOX', readonly=False)
+            except Exception as select_err:
+                print(f"[IMAP] 选择文件夹失败: {select_err}")
+                # 尝试重新连接
+                try:
+                    imap_conn = imaplib.IMAP4_SSL(account['imap_host'], account['imap_port'], ssl_context=ctx)
+                    imap_conn.login(account['username'], account['password'])
+                    imap_conn.select('INBOX', readonly=False)
+                except Exception as re_err:
+                    print(f"[IMAP] 重新连接失败: {re_err}")
+
+            # 搜索未读邮件
+            try:
+                _, messages = imap_conn.search(None, 'UNSEEN')
+                email_ids = messages[0].split() if messages[0] else []
+                print(f"[IMAP] 找到 {len(email_ids)} 封未读邮件")
+
+                # 标记为已读
+                if email_ids:
+                    for email_id in email_ids:
+                        try:
+                            imap_conn.store(email_id, '+FLAGS', '\\Seen')
+                        except Exception as store_err:
+                            print(f"[IMAP] 标记失败: {store_err}")
+                            continue
+            except Exception as search_err:
+                print(f"[IMAP] 搜索失败: {search_err}")
+
+            imap_conn.logout()
+        except Exception as e:
+            print(f"[IMAP] 标记已读失败: {e}")
+
+        # 更新本地数据库
+        with db.get_connection() as conn:
+            conn.execute(
+                "UPDATE email_messages SET is_read = 1 WHERE account_id = ?",
+                (account_id,)
+            )
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/mark-read/<msg_id>', methods=['POST'])
+def mark_single_as_read(account_id, msg_id):
+    """标记单封邮件为已读 - 同步到服务器"""
+    try:
+        # 获取账户信息
+        with db.get_connection() as conn:
+            account = conn.execute(
+                "SELECT * FROM email_accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            msg = conn.execute(
+                "SELECT uid FROM email_messages WHERE id = ?", (msg_id,)
+            ).fetchone()
+
+        if not account or not msg:
+            return jsonify({'success': False, 'error': '邮件不存在'}), 404
+
+        # 连接到 IMAP 并标记该邮件为已读
+        try:
+            imap_conn = get_imap_connection(dict(account))
+            imap_conn.select('INBOX')
+
+            # 使用 UID 标记已读
+            if msg['uid']:
+                try:
+                    imap_conn.uid('STORE', msg['uid'], '+FLAGS', '\\Seen')
+                except:
+                    pass
+
+            imap_conn.logout()
+        except Exception as e:
+            print(f"[IMAP] 标记已读失败: {e}")
+
+        # 更新本地数据库
+        with db.get_connection() as conn:
+            conn.execute(
+                "UPDATE email_messages SET is_read = 1 WHERE id = ? AND account_id = ?",
+                (msg_id, account_id)
+            )
+
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/reply-url/<msg_id>', methods=['GET'])
+def get_reply_url(account_id, msg_id):
+    """获取网页回复链接"""
+    try:
+        with db.get_connection() as conn:
+            account = conn.execute(
+                "SELECT provider, email FROM email_accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+            msg = conn.execute(
+                "SELECT sender_email FROM email_messages WHERE id = ?", (msg_id,)
+            ).fetchone()
+
+        if not account or not msg:
+            return jsonify({'success': False, 'error': '信息不存在'}), 404
+
+        # 根据提供商返回不同的网页链接
+        reply_urls = {
+            'gmail': f"https://mail.google.com/mail/u/{account['email']}/#compose",
+            'outlook': "https://outlook.live.com/mail/compose",
+            'qq': "https://mail.qq.com/",
+            '163': "https://mail.163.com/",
+            'yahoo': "https://mail.yahoo.com/compose",
+            'icloud': "https://www.icloud.com/mail/"
+        }
+
+        return jsonify({
+            'success': True,
+            'reply_url': reply_urls.get(account['provider'], ''),
+            'to': msg['sender_email']
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
