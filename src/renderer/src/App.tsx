@@ -2794,6 +2794,7 @@ function EmailView() {
   const [selectedMessage, setSelectedMessage] = useState<any>(null);
   const [messages, setMessages] = useState<Array<any>>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [showToast, setShowToast] = useState<{msg: string, type: string} | null>(null);
 
   // 添加邮箱表单
@@ -2900,7 +2901,7 @@ function EmailView() {
       const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/messages?unread_only=${unreadOnly}`));
       const data = await res.json();
       if (data.success) {
-        setMessages(data.messages);
+        setMessages(data.messages || []);
       }
     } catch (err) {
       console.error('获取邮件失败:', err);
@@ -2912,10 +2913,11 @@ function EmailView() {
   // 同步邮件
   const syncEmails = async (accountId: string) => {
     try {
+      setSyncing(true);
       const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/sync`), { method: 'POST' });
       const data = await res.json();
       if (data.success) {
-        setShowToast({ msg: `同步成功，获取 ${data.fetched} 封新邮件`, type: 'success' });
+        setShowToast({ msg: `同步成功，获取 ${data.fetched_count} 封新邮件`, type: 'success' });
         fetchAccounts();
         if (selectedAccount === accountId) {
           fetchMessages(accountId, true);
@@ -2924,7 +2926,10 @@ function EmailView() {
         setShowToast({ msg: data.error || '同步失败', type: 'error' });
       }
     } catch (err) {
+      console.error('同步失败:', err);
       setShowToast({ msg: '同步失败', type: 'error' });
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -2959,6 +2964,35 @@ function EmailView() {
       }
     } catch (err) {
       console.error('标记已读失败:', err);
+    }
+  };
+
+  // 选择邮件并加载详情
+  const handleSelectMessage = async (previewMsg: any) => {
+    // 先显示预览数据并标记加载中
+    setSelectedMessage({ ...previewMsg, isLoading: true });
+
+    // 如果这封邮件是未读的，本地先标记为已读（UI更新）
+    if (!previewMsg.is_read && selectedAccount) {
+      markAsRead(selectedAccount, previewMsg.id);
+    }
+
+    try {
+      // 请求后端获取完整内容
+      const res = await fetch(getServerUrl(`/api/email/accounts/${selectedAccount}/messages/${previewMsg.id}`));
+      const data = await res.json();
+
+      if (data.success) {
+        setSelectedMessage((prev: any) => ({
+          ...prev,
+          ...data.message,
+          isLoading: false
+        }));
+      } else {
+        setSelectedMessage((prev: any) => ({ ...prev, isLoading: false, body: '获取失败' }));
+      }
+    } catch (err) {
+      setSelectedMessage((prev: any) => ({ ...prev, isLoading: false, body: '网络请求错误' }));
     }
   };
 
@@ -3053,193 +3087,221 @@ function EmailView() {
 
   return (
     <>
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
       <div className="page-header" style={{ margin: '-20px -24px 20px -24px', padding: '16px 24px' }}>
         <div>
           <div className="page-title">邮箱管理</div>
           <div className="page-subtitle">绑定邮箱账号，收发未读邮件</div>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="btn-primary"
-          style={{
-            padding: '8px 16px',
-            background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
-            border: 'none',
-            borderRadius: '8px',
-            color: 'white',
-            fontSize: '14px',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px'
-          }}
-        >
-          <i className="fa-solid fa-plus"></i>
-          添加邮箱
-        </button>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            onClick={() => {
+              // 同步所有邮箱
+              accounts.forEach(acc => syncEmails(acc.id));
+            }}
+            disabled={accounts.length === 0 || syncing}
+            className="btn-primary"
+            style={{
+              padding: '8px 16px',
+              background: 'linear-gradient(135deg, #10B981, #059669)',
+              border: 'none',
+              borderRadius: '8px',
+              color: 'white',
+              fontSize: '14px',
+              cursor: accounts.length === 0 || syncing ? 'not-allowed' : 'pointer',
+              opacity: accounts.length === 0 || syncing ? 0.6 : 1,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            <i className="fa-solid fa-sync-alt" style={{ animation: syncing ? 'spin 1s linear infinite' : 'none' }}></i>
+            全部同步
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="btn-primary"
+            style={{
+              padding: '8px 16px',
+              background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+              border: 'none',
+              borderRadius: '8px',
+              color: 'white',
+              fontSize: '14px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}
+          >
+            <i className="fa-solid fa-plus"></i>
+            添加邮箱
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: '20px', height: 'calc(100vh - 180px)' }}>
-        {/* 左侧：邮箱账户列表 */}
-        <div style={{ width: '280px', flexShrink: 0 }}>
-          <div className="card" style={{ padding: '16px' }}>
-            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>
-              已绑定邮箱 ({accounts.length})
-            </div>
+        {/* 第一级：邮箱账户列表 - 默认占满全屏，选择邮箱后隐藏 */}
+        {!selectedAccount && (
+          <div style={{ flex: 1 }}>
+            <div className="card" style={{ padding: '16px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                已绑定邮箱 ({accounts.length})
+              </div>
 
-            {loading ? (
-              <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
-                加载中...
-              </div>
-            ) : accounts.length === 0 ? (
-              <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
-                  <i className="fa-solid fa-envelope"></i>
+              {loading ? (
+                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
+                  加载中...
                 </div>
-                <div>暂无绑定邮箱</div>
-                <div style={{ fontSize: '12px', marginTop: '8px' }}>点击右上角添加邮箱</div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {accounts.map(account => (
-                  <div
-                    key={account.id}
-                    onClick={() => handleSelectAccount(account.id)}
-                    style={{
-                      padding: '14px',
-                      borderRadius: '10px',
-                      background: selectedAccount === account.id
-                        ? 'linear-gradient(135deg, rgba(157, 80, 187, 0.1) 0%, rgba(110, 72, 170, 0.1) 100%)'
-                        : 'rgba(255, 255, 255, 0.5)',
-                      border: selectedAccount === account.id ? '1px solid rgba(157, 80, 187, 0.3)' : '1px solid transparent',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <div style={{
-                          width: '36px',
-                          height: '36px',
-                          borderRadius: '8px',
-                          background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        }}>
-                          <i className="fa-solid fa-envelope" style={{ color: 'white', fontSize: '14px' }}></i>
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: 500, fontSize: '13px' }}>{account.email}</div>
-                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{account.provider}</div>
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        {account.unread_count > 0 && (
-                          <span style={{
-                            background: '#EF4444',
-                            color: 'white',
-                            padding: '2px 8px',
-                            borderRadius: '10px',
-                            fontSize: '11px',
-                            fontWeight: 600
+              ) : accounts.length === 0 ? (
+                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
+                  <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
+                    <i className="fa-solid fa-envelope"></i>
+                  </div>
+                  <div>暂无绑定邮箱</div>
+                  <div style={{ fontSize: '12px', marginTop: '8px' }}>点击右上角添加邮箱</div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, overflow: 'auto' }}>
+                  {accounts.map(account => (
+                    <div
+                      key={account.id}
+                      onClick={() => {
+                        handleSelectAccount(account.id);
+                        setSelectedMessage(null);
+                      }}
+                      style={{
+                        padding: '14px',
+                        borderRadius: '10px',
+                        background: 'rgba(255, 255, 255, 0.5)',
+                        border: '1px solid transparent',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <div style={{
+                            width: '36px',
+                            height: '36px',
+                            borderRadius: '8px',
+                            background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
                           }}>
-                            {account.unread_count}
-                          </span>
-                        )}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleEditAccount(account);
-                          }}
-                          title="编辑"
-                          style={{
-                            width: '28px',
-                            height: '28px',
-                            borderRadius: '6px',
-                            border: 'none',
-                            background: 'rgba(0, 0, 0, 0.05)',
-                            color: '#6B7280',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}
-                        >
-                          <i className="fa-solid fa-pen" style={{ fontSize: '12px' }}></i>
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            confirmDeleteAccount(account.id);
-                          }}
-                          title="删除"
-                          style={{
-                            width: '28px',
-                            height: '28px',
-                            borderRadius: '6px',
-                            border: 'none',
-                            background: 'rgba(239, 68, 68, 0.1)',
-                            color: '#EF4444',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}
-                        >
-                          <i className="fa-solid fa-trash" style={{ fontSize: '12px' }}></i>
-                        </button>
+                            <i className="fa-solid fa-envelope" style={{ color: 'white', fontSize: '14px' }}></i>
+                          </div>
+                          <div>
+                            <div style={{ fontWeight: 500, fontSize: '13px' }}>{account.email}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{account.provider}</div>
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          {account.unread_count > 0 && (
+                            <span style={{
+                              background: '#EF4444',
+                              color: 'white',
+                              padding: '2px 8px',
+                              borderRadius: '10px',
+                              fontSize: '11px',
+                              fontWeight: 600
+                            }}>
+                              {account.unread_count}
+                            </span>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleEditAccount(account);
+                            }}
+                            title="编辑"
+                            style={{
+                              width: '28px',
+                              height: '28px',
+                              borderRadius: '6px',
+                              border: 'none',
+                              background: 'rgba(0, 0, 0, 0.05)',
+                              color: '#6B7280',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            <i className="fa-solid fa-pen" style={{ fontSize: '12px' }}></i>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              confirmDeleteAccount(account.id);
+                            }}
+                            title="删除"
+                            style={{
+                              width: '28px',
+                              height: '28px',
+                              borderRadius: '6px',
+                              border: 'none',
+                              background: 'rgba(239, 68, 68, 0.1)',
+                              color: '#EF4444',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            <i className="fa-solid fa-trash" style={{ fontSize: '12px' }}></i>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 第二级：选择邮箱后显示两列 - 左侧邮件列表，右侧邮件内容 */}
+        {selectedAccount && selectedAccountData && (
+          <div style={{ flex: 1, display: 'flex', gap: '20px' }}>
+            {/* 左侧：邮件列表 */}
+            <div style={{ width: '380px', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+              <div className="card" style={{ padding: '16px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+                {/* 邮件列表头部 */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <button
+                      onClick={() => setSelectedAccount(null)}
+                      style={{
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '6px',
+                        border: 'none',
+                        background: 'rgba(0, 0, 0, 0.05)',
+                        color: 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                      title="返回邮箱列表"
+                    >
+                      <i className="fa-solid fa-arrow-left"></i>
+                    </button>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: '14px' }}>{selectedAccountData.email}</div>
+                      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                        {messages.filter(m => !m.is_read).length} 封未读邮件
                       </div>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* 右侧：邮件列表 */}
-        {selectedAccount && selectedAccountData && (
-          <div style={{ width: '400px', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-            <div className="card" style={{ padding: '16px' }}>
-              {/* 邮件列表头部 */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '10px',
-                    background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center'
-                  }}>
-                    <i className="fa-solid fa-envelope" style={{ color: 'white', fontSize: '16px' }}></i>
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: '14px' }}>{selectedAccountData.email}</div>
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                      {messages.filter(m => !m.is_read).length} 封未读邮件
-                    </div>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    onClick={() => markAllAsRead(selectedAccount)}
-                    style={{
-                      padding: '6px 12px',
-                      borderRadius: '6px',
-                      border: '1px solid rgba(157, 80, 187, 0.3)',
-                      background: 'white',
-                      color: '#9D50BB',
-                      fontSize: '12px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <i className="fa-solid fa-check-double" style={{ marginRight: '4px' }}></i>
-                    一键已读
-                  </button>
                   <button
                     onClick={() => syncEmails(selectedAccount)}
                     style={{
@@ -3256,241 +3318,177 @@ function EmailView() {
                     同步
                   </button>
                 </div>
-              </div>
 
-              {/* 邮件列表 */}
-              {messagesLoading ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                  <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
-                  加载中...
-                </div>
-              ) : messages.length === 0 ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                  <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
-                    <i className="fa-regular fa-folder-open"></i>
+                {/* 邮件列表 */}
+                {messagesLoading ? (
+                  <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
+                    加载中...
                   </div>
-                  <div>暂无未读邮件</div>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  {messages.map(msg => (
-                    <div
-                      key={msg.id}
-                      onClick={() => setSelectedMessage(msg)}
-                      style={{
-                        padding: '14px',
-                        borderRadius: '8px',
-                        background: selectedMessage?.id === msg.id
-                          ? 'rgba(157, 80, 187, 0.1)'
-                          : msg.is_read ? 'transparent' : 'rgba(157, 80, 187, 0.05)',
-                        border: selectedMessage?.id === msg.id
-                          ? '1px solid rgba(157, 80, 187, 0.4)'
-                          : '1px solid rgba(0, 0, 0, 0.05)',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s'
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                            marginBottom: '4px'
-                          }}>
-                            <span style={{
-                              fontWeight: msg.is_read ? 400 : 600,
-                              fontSize: '13px',
-                              color: 'var(--text-primary)'
-                            }}>
-                              {msg.sender_email || msg.sender || '未知发件人'}
-                            </span>
+                ) : messages.length === 0 ? (
+                  <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
+                      <i className="fa-regular fa-folder-open"></i>
+                    </div>
+                    <div style={{marginLeft: '5px'}}>暂无未读邮件</div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, overflow: 'auto' }}>
+                    {messages.map(msg => (
+                      <div
+                        key={msg.id}
+                        onClick={() => handleSelectMessage(msg)}
+                        style={{
+                          padding: '14px',
+                          borderRadius: '8px',
+                          background: selectedMessage?.id === msg.id
+                            ? 'rgba(157, 80, 187, 0.1)'
+                            : msg.is_read ? 'transparent' : 'rgba(157, 80, 187, 0.05)',
+                          border: selectedMessage?.id === msg.id
+                            ? '1px solid rgba(157, 80, 187, 0.4)'
+                            : '1px solid rgba(0, 0, 0, 0.05)',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                              <span style={{ fontWeight: msg.is_read ? 400 : 600, fontSize: '13px' }}>
+                                {msg.sender_email || msg.sender || '未知发件人'}
+                              </span>
+                              {!msg.is_read && (
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#9D50BB' }}></span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                              {msg.subject || '无主题'}
+                            </div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                              {msg.date}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: '4px' }}>
                             {!msg.is_read && (
-                              <span style={{
-                                width: '8px',
-                                height: '8px',
-                                borderRadius: '50%',
-                                background: '#9D50BB'
-                              }}></span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); markAsRead(selectedAccount, msg.id); }}
+                                title="标记为已读"
+                                style={{
+                                  width: '28px',
+                                  height: '28px',
+                                  borderRadius: '6px',
+                                  border: 'none',
+                                  background: 'rgba(16, 185, 129, 0.1)',
+                                  color: '#10B981',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}
+                              >
+                                <i className="fa-regular fa-check-circle" style={{ fontSize: '12px' }}></i>
+                              </button>
+                            )}
+                            {msg.sender_email && (
+                              <button
+                                onClick={() => {
+                                  const url = `https://mail.${selectedAccountData.provider === 'gmail' ? 'google' : selectedAccountData.provider === 'qq' ? 'qq' : ''}.com/mail`;
+                                  (window as any).electron?.shell?.openExternal?.(url);
+                                }}
+                                title="网页回复"
+                                style={{
+                                  width: '28px',
+                                  height: '28px',
+                                  borderRadius: '6px',
+                                  border: 'none',
+                                  background: 'rgba(157, 80, 187, 0.1)',
+                                  color: '#9D50BB',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center'
+                                }}
+                              >
+                                <i className="fa-regular fa-paper-plane" style={{ fontSize: '12px' }}></i>
+                              </button>
                             )}
                           </div>
-                          <div style={{
-                            fontSize: '12px',
-                            color: 'var(--text-secondary)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap'
-                          }}>
-                            {msg.subject || '无主题'}
-                          </div>
-                          <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                            {msg.date}
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: '4px' }}>
-                          {!msg.is_read && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                markAsRead(selectedAccount, msg.id);
-                              }}
-                              title="标记为已读"
-                              style={{
-                                width: '28px',
-                                height: '28px',
-                                borderRadius: '6px',
-                                border: 'none',
-                                background: 'rgba(16, 185, 129, 0.1)',
-                                color: '#10B981',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                              }}
-                            >
-                              <i className="fa-regular fa-check-circle" style={{ fontSize: '12px' }}></i>
-                            </button>
-                          )}
-                          {msg.sender_email && (
-                            <button
-                              onClick={() => {
-                                const url = `https://mail.${selectedAccountData.provider === 'gmail' ? 'google' : selectedAccountData.provider === 'qq' ? 'qq' : ''}.com/mail`;
-                                (window as any).electron?.shell?.openExternal?.(url);
-                              }}
-                              title="网页回复"
-                              style={{
-                                width: '28px',
-                                height: '28px',
-                                borderRadius: '6px',
-                                border: 'none',
-                                background: 'rgba(157, 80, 187, 0.1)',
-                                color: '#9D50BB',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                              }}
-                            >
-                              <i className="fa-regular fa-paper-plane" style={{ fontSize: '12px' }}></i>
-                            </button>
-                          )}
                         </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* 右侧：邮件详情 */}
-        {selectedMessage && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-            <div className="card" style={{ padding: '0', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              {/* 邮件详情头部 */}
-              <div style={{
-                padding: '20px',
-                borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
-                display: 'flex',
-                alignItems: 'flex-start',
-                justifyContent: 'space-between'
-              }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: '16px',
-                    fontWeight: 600,
-                    marginBottom: '12px',
-                    wordBreak: 'break-word'
-                  }}>
-                    {selectedMessage.subject || '无主题'}
+                    ))}
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                    <div style={{
-                      width: '40px',
-                      height: '40px',
-                      borderRadius: '50%',
-                      background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: 'white',
-                      fontWeight: 600,
-                      fontSize: '14px'
-                    }}>
-                      {(selectedMessage.sender || selectedMessage.sender_email || '?')[0].toUpperCase()}
-                    </div>
-                    <div>
-                      <div style={{ fontWeight: 500, fontSize: '14px' }}>
-                        {selectedMessage.sender || '未知发件人'}
+                )}
+              </div>
+            </div>
+
+            {/* 右侧：邮件内容 */}
+            {selectedMessage ? (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <div className="card" style={{ padding: '20px', flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  {/* 邮件头部 */}
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '16px', paddingBottom: '16px', borderBottom: '1px solid rgba(0, 0, 0, 0.08)' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px' }}>
+                        {selectedMessage.subject || '无主题'}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                        <div style={{
+                          width: '40px',
+                          height: '40px',
+                          borderRadius: '50%',
+                          background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'white',
+                          fontWeight: 600,
+                          fontSize: '14px'
+                        }}>
+                          {(selectedMessage.sender || '?')[0].toUpperCase()}
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 500, fontSize: '14px' }}>
+                            {selectedMessage.sender || '未知发件人'}
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                            {selectedMessage.sender_email}
+                          </div>
+                        </div>
                       </div>
                       <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                        {selectedMessage.sender_email}
+                        收件人：{selectedMessage.recipients || selectedAccountData?.email}
+                      </div>
+                      {selectedMessage.from_raw && selectedMessage.from_raw !== selectedMessage.sender && (
+                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                          <span style={{ color: 'var(--text-secondary)' }}>原始发件人：</span>{selectedMessage.from_raw}
+                        </div>
+                      )}
+                      <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                        {selectedMessage.date}
                       </div>
                     </div>
                   </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-                    收件人：{selectedMessage.recipients || selectedAccountData?.email}
-                  </div>
-                  {selectedMessage.from_raw && selectedMessage.from_raw !== selectedMessage.sender && (
-                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      <span style={{ color: 'var(--text-secondary)' }}>原始发件人：</span>{selectedMessage.from_raw}
-                    </div>
-                  )}
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                    {selectedMessage.date}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setSelectedMessage(null)}
-                  style={{
-                    width: '32px',
-                    height: '32px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    background: 'rgba(0, 0, 0, 0.05)',
-                    color: 'var(--text-secondary)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center'
-                  }}
-                >
-                  <i className="fa-solid fa-times"></i>
-                </button>
-              </div>
 
-              {/* 邮件内容 */}
-              <div style={{
-                flex: 1,
-                overflow: 'auto',
-                padding: '20px',
-                fontSize: '14px',
-                lineHeight: '1.6'
-              }}>
-                {/* 纯文本内容 */}
-                {selectedMessage.body && !selectedMessage.body_html && (
-                  <pre style={{
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    fontFamily: 'inherit',
-                    margin: 0
-                  }}>
-                    {selectedMessage.body}
-                  </pre>
-                )}
-
-                {/* HTML内容 */}
-                {selectedMessage.body_html && (
-                  <iframe
-                    srcDoc={`<!DOCTYPE html>
+                  {/* 邮件内容 */}
+                  <div style={{ flex: 1, overflow: 'auto', fontSize: '14px', lineHeight: '1.6' }}>
+                    {selectedMessage.isLoading ? (
+                      <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                        <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
+                        正在加载邮件内容...
+                      </div>
+                    ) : (
+                      <>
+                        {selectedMessage.body_html ? (
+                          <iframe
+                            title="Email Content"
+                            srcDoc={`<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; margin: 0; padding: 0; }
-img { max-width: 100%; height: auto; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; margin: 0; padding: 16px; }
+img { max-width: 100%; height: auto; border-radius: 4px; }
 a { color: #9D50BB; }
 blockquote { border-left: 4px solid #ddd; margin: 0; padding-left: 16px; color: #666; }
 pre { background: #f5f5f5; padding: 12px; border-radius: 8px; overflow-x: auto; }
@@ -3500,24 +3498,82 @@ pre { background: #f5f5f5; padding: 12px; border-radius: 8px; overflow-x: auto; 
 ${selectedMessage.body_html}
 </body>
 </html>`}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      border: 'none',
-                      minHeight: '300px'
-                    }}
-                    sandbox="allow-same-origin"
-                  />
-                )}
-
-                {/* 纯文本但没有HTML时显示纯文本 */}
-                {!selectedMessage.body && !selectedMessage.body_html && (
-                  <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '40px' }}>
-                    邮件内容为空
+                            style={{ width: '100%', height: '100%', border: 'none', minHeight: '300px' }}
+                            sandbox="allow-same-origin"
+                          />
+                        ) : selectedMessage.body ? (
+                          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', margin: 0, padding: '16px' }}>
+                            {selectedMessage.body}
+                          </pre>
+                        ) : (
+                          <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '40px' }}>
+                            邮件内容为空
+                          </div>
+                        )}
+                        
+                        {/* 附件列表 */}
+                        {selectedMessage.attachments && selectedMessage.attachments.length > 0 && (
+                          <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(0,0,0,0.06)', background: 'rgba(0,0,0,0.02)' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                              <i className="fa-solid fa-paperclip" style={{ marginRight: '6px' }}></i>
+                              附件 ({selectedMessage.attachments.length})
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                              {selectedMessage.attachments.map((att: any, idx: number) => (
+                                <div 
+                                  key={idx} 
+                                  onClick={() => {
+                                    window.open(getServerUrl(`/api/email/attachments/${att.id}`), '_blank');
+                                  }}
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '8px',
+                                    padding: '8px 12px',
+                                    background: 'white',
+                                    borderRadius: '6px',
+                                    border: '1px solid rgba(0,0,0,0.08)',
+                                    fontSize: '12px',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s'
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    e.currentTarget.style.background = 'rgba(157, 80, 187, 0.05)';
+                                    e.currentTarget.style.borderColor = 'rgba(157, 80, 187, 0.3)';
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    e.currentTarget.style.background = 'white';
+                                    e.currentTarget.style.borderColor = 'rgba(0,0,0,0.08)';
+                                  }}
+                                  title="点击下载"
+                                >
+                                  <i className={`fa-solid ${att.content_type?.startsWith('image/') ? 'fa-image' : att.content_type?.includes('pdf') ? 'fa-file-pdf' : 'fa-file'}`} 
+                                     style={{ color: '#9D50BB' }}></i>
+                                  <span style={{ color: 'var(--text-primary)' }}>{att.filename}</span>
+                                  {att.size && (
+                                    <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                                      ({att.size > 1024 * 1024 ? `${(att.size / 1024 / 1024).toFixed(1)}MB` : `${(att.size / 1024).toFixed(0)}KB`})
+                                    </span>
+                                  )}
+                                  <i className="fa-solid fa-download" style={{ color: 'var(--text-muted)', fontSize: '10px', marginLeft: '4px' }}></i>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                )}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <i className="fa-regular fa-envelope-open" style={{ fontSize: '48px', marginBottom: '12px', opacity: 0.5 }}></i>
+                  <div>点击左侧邮件查看内容</div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

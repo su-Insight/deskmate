@@ -28,6 +28,11 @@ from openai import OpenAI
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'data', 'deskmate.db')
+STORAGE_DIR = os.path.join(BASE_DIR, 'storage')
+INLINE_IMAGES_DIR = os.path.join(STORAGE_DIR, 'inline_images')
+
+# 确保 storage 目录存在
+os.makedirs(INLINE_IMAGES_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 app = Flask(__name__)
@@ -128,6 +133,20 @@ class DatabaseManager:
                 conn.execute("ALTER TABLE email_messages ADD COLUMN recipients TEXT")
             except:
                 pass
+            
+            # 附件存储表
+            conn.execute("""CREATE TABLE IF NOT EXISTS email_attachments (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT,
+                content_id TEXT,
+                size INTEGER,
+                data BLOB,
+                is_inline INTEGER DEFAULT 0,
+                FOREIGN KEY(message_id) REFERENCES email_messages(id) ON DELETE CASCADE
+            )""")
+            
             defaults = [
                 ('api_key', '', 'secret', 'API密钥'),
                 ('base_url', 'https://api.openai.com/v1', 'string', 'API地址'),
@@ -1228,46 +1247,79 @@ def sync_email_messages(account_id):
                 body = ''
                 body_html = ''
                 attachments = []
+                inline_images = {}
 
                 def parse_part(part):
                     """递归解析邮件部分"""
+                    nonlocal body, body_html, attachments, inline_images
                     try:
                         content_type = part.get_content_type()
                         content_disposition = str(part.get('Content-Disposition', ''))
+                        content_id = part.get('Content-ID', '')
 
                         # 获取文件名
                         filename = part.get_filename()
+                        if filename:
+                            filename = decode_text(filename)
 
-                        # === 附件处理逻辑 ===
-                        if filename or 'attachment' in content_disposition:
-                            if filename:
-                                filename = decode_text(filename)
-                            else:
+                        # 获取附件内容
+                        payload = part.get_payload(decode=True)
+                        
+                        # 调试：打印图片部分信息
+                        if content_type.startswith('image/'):
+                            print(f"[调试] 发现图片: cid={content_id}, filename={filename}, disposition={content_disposition}")
+                        
+                        # === 内嵌图片处理 (有 Content-ID 的图片，或 inline 图片) ===
+                        if content_type.startswith('image/'):
+                            if content_id:
+                                # 有 Content-ID 的内嵌图片
+                                cid = content_id.strip('<>')
+                                inline_images[cid] = {
+                                    'filename': filename or f"image_{len(inline_images) + 1}",
+                                    'content_type': content_type,
+                                    'data': payload,
+                                    'size': len(payload) if payload else 0
+                                }
+                                print(f"[调试] 添加内嵌图片: {cid}")
+                                return
+                            elif 'inline' in content_disposition.lower():
+                                # inline 图片但没有 Content-ID，用文件名作为 key
+                                if filename:
+                                    inline_images[filename] = {
+                                        'filename': filename,
+                                        'content_type': content_type,
+                                        'data': payload,
+                                        'size': len(payload) if payload else 0
+                                    }
+                                    print(f"[调试] 添加 inline 图片: {filename}")
+                                    return
+
+                        # === 真正的附件处理 ===
+                        if filename or 'attachment' in content_disposition.lower():
+                            if not filename:
                                 filename = "unknown_file"
 
-                            # 获取附件大小
-                            payload = part.get_payload(decode=True)
-                            size = len(payload) if payload else 0
-
                             attachments.append({
+                                'id': str(uuid.uuid4()),
                                 'filename': filename,
-                                'size': size,
-                                'content_type': content_type
+                                'size': len(payload) if payload else 0,
+                                'content_type': content_type,
+                                'data': payload
                             })
                             return
 
                         # === 正文处理逻辑 ===
-                        try:
-                            payload = part.get_payload(decode=True)
-                            charset = part.get_content_charset() or 'utf-8'
-                            content = payload.decode(charset, errors='ignore')
-                        except:
-                            content = str(part.get_payload())
+                        if content_type == 'text/html' or content_type == 'text/plain':
+                            try:
+                                charset = part.get_content_charset() or 'utf-8'
+                                content = payload.decode(charset, errors='ignore')
+                            except:
+                                content = str(part.get_payload())
 
-                        if content_type == 'text/html':
-                            body_html += content
-                        elif content_type == 'text/plain':
-                            body += content
+                            if content_type == 'text/html':
+                                body_html += content
+                            elif content_type == 'text/plain':
+                                body += content
                     except Exception as e:
                         print(f"[邮件解析] 解析部分失败: {e}")
 
@@ -1282,6 +1334,57 @@ def sync_email_messages(account_id):
 
                 walk_parts(msg)
 
+                # --- 将内嵌图片保存到本地文件 ---
+                def detect_image_extension(data):
+                    """根据图片数据头部检测文件扩展名"""
+                    if not data or len(data) < 8:
+                        return 'png'
+                    if data[:8] == b'\x89PNG\r\n\x1a\n':
+                        return 'png'
+                    elif data[:2] == b'\xff\xd8':
+                        return 'jpg'
+                    elif data[:6] in (b'GIF87a', b'GIF89a'):
+                        return 'gif'
+                    elif data[:4] == b'RIFF' and len(data) > 12 and data[8:12] == b'WEBP':
+                        return 'webp'
+                    return 'png'
+                
+                print(f"[调试] 内嵌图片数量: {len(inline_images)}, keys: {list(inline_images.keys())}")
+                for cid, img_info in inline_images.items():
+                    if img_info['data']:
+                        ext = detect_image_extension(img_info['data'])
+                        safe_cid = re.sub(r'[<>:"/\\|?*]', '_', cid)
+                        filename = f"{msg_uuid}_{safe_cid}.{ext}"
+                        filepath = os.path.join(INLINE_IMAGES_DIR, filename)
+                        
+                        with open(filepath, 'wb') as f:
+                            f.write(img_info['data'])
+                        
+                        img_url = f"http://127.0.0.1:5000/api/email/inline-images/{filename}"
+                        print(f"[调试] 替换 CID: {cid} -> {img_url}")
+                        body_html = body_html.replace(f'cid:{cid}', img_url)
+                        body_html = body_html.replace(f'src="cid:{cid}"', f'src="{img_url}"')
+                        body_html = body_html.replace(f"src='cid:{cid}'", f"src='{img_url}'")
+                
+                import re
+                remaining_cids = re.findall(r'cid:([^"\'\s>]+)', body_html)
+                if remaining_cids:
+                    print(f"[调试] 未替换的 CID: {remaining_cids}")
+                    for remaining_cid in remaining_cids:
+                        for stored_cid, img_info in inline_images.items():
+                            if remaining_cid.lower() in stored_cid.lower() or stored_cid.lower() in remaining_cid.lower():
+                                ext = detect_image_extension(img_info['data'])
+                                safe_cid = re.sub(r'[<>:"/\\|?*]', '_', stored_cid)
+                                filename = f"{msg_uuid}_{safe_cid}.{ext}"
+                                filepath = os.path.join(INLINE_IMAGES_DIR, filename)
+                                
+                                with open(filepath, 'wb') as f:
+                                    f.write(img_info['data'])
+                                
+                                img_url = f"http://127.0.0.1:5000/api/email/inline-images/{filename}"
+                                body_html = body_html.replace(f'cid:{remaining_cid}', img_url)
+                                break
+
                 # --- 原始发件人逻辑 ---
                 # 1. 优先看 Reply-To
                 reply_to = decode_text(msg.get('Reply-To', ''))
@@ -1295,17 +1398,19 @@ def sync_email_messages(account_id):
 
                 msg_uuid = str(uuid.uuid4())
                 
-                # 构造数据对象
+                uid_str = str(email_id.decode())
+                
+                # 构造数据对象 (不包含附件数据，附件单独存储)
                 email_data = {
                     'id': msg_uuid,
                     'account_id': account_id,
-                    'uid': str(email_id.decode()), # IMAP UID
+                    'uid': uid_str,
                     'subject': subject,
-                    'sender': original_sender_info, # 使用处理过的原始发件人信息
+                    'sender': original_sender_info,
                     'sender_email': sender_email,
-                    'body': body[:10000], # 截断防止过大
+                    'body': body[:10000],
                     'body_html': body_html[:50000],
-                    'attachments': json.dumps(attachments), # 序列化附件列表
+                    'attachments': json.dumps([{'id': a['id'], 'filename': a['filename'], 'size': a['size'], 'content_type': a['content_type']} for a in attachments]),
                     'date': date,
                     'is_read': 0,
                     'fetched_at': now
@@ -1313,22 +1418,29 @@ def sync_email_messages(account_id):
 
                 # --- 存入数据库 ---
                 with db.get_connection() as db_conn:
-                    # 假设你已经修改了数据库表，增加了 attachments 字段
-                    # 如果没有修改表，请先执行 SQL ALTER TABLE
-                    db_conn.execute("""
+                    cursor = db_conn.cursor()
+                    cursor.execute("""
                         INSERT OR IGNORE INTO email_messages
                         (id, account_id, uid, subject, sender, sender_email, 
                          date, body, body_html, is_read, folder, fetched_at, attachments)
                         VALUES (:id, :account_id, :uid, :subject, :sender, :sender_email, 
                                 :date, :body, :body_html, :is_read, 'INBOX', :fetched_at, :attachments)
                     """, email_data)
-                    fetched_count += 1
                     
-                    # 转换 attachments 为对象返回给前端，而不是 JSON 字符串
-                    email_data['attachments'] = attachments
-                    fetched_emails.append(email_data)
-
-                print(f"[邮件同步] 已处理: {subject[:20]} | 附件: {len(attachments)}")
+                    if cursor.rowcount > 0:
+                        # 保存附件到附件表
+                        for att in attachments:
+                            cursor.execute("""
+                                INSERT INTO email_attachments (id, message_id, filename, content_type, size, data)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (att['id'], msg_uuid, att['filename'], att['content_type'], att['size'], att['data']))
+                        
+                        fetched_count += 1
+                        email_data['attachments'] = [{'id': a['id'], 'filename': a['filename'], 'size': a['size'], 'content_type': a['content_type']} for a in attachments]
+                        fetched_emails.append(email_data)
+                        print(f"[邮件同步] 新邮件: {subject[:30]} | 附件: {len(attachments)}")
+                    else:
+                        print(f"[邮件同步] 邮件已存在: {subject[:30]}")
 
             except Exception as e:
                 print(f"[邮件同步] 处理单封邮件失败 {email_id}: {e}")
@@ -1433,10 +1545,66 @@ def get_email_message_detail(account_id, msg_id):
                 'date': msg['date'],
                 'body': msg['body'],
                 'body_html': msg['body_html'],
-                'is_read': msg['is_read']
+                'is_read': msg['is_read'],
+                'attachments': json.loads(msg['attachments']) if msg['attachments'] else []
             },
             'unread_count': unread['count'] if unread else 0
         })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/attachments/<attachment_id>', methods=['GET'])
+def download_email_attachment(attachment_id):
+    """下载附件"""
+    try:
+        with db.get_connection() as conn:
+            att = conn.execute(
+                "SELECT * FROM email_attachments WHERE id = ?",
+                (attachment_id,)
+            ).fetchone()
+
+        if not att:
+            return jsonify({'success': False, 'error': '附件不存在'}), 404
+
+        from flask import Response
+        response = Response(
+            att['data'],
+            mimetype=att['content_type'] or 'application/octet-stream',
+            headers={
+                'Content-Disposition': f'attachment; filename="{att["filename"]}"',
+                'Content-Length': att['size']
+            }
+        )
+        return response
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/inline-images/<filename>', methods=['GET'])
+def get_inline_image(filename):
+    """获取内嵌图片"""
+    try:
+        safe_filename = os.path.basename(filename)
+        if not safe_filename:
+            return jsonify({'success': False, 'error': '无效的文件名'}), 400
+        
+        filepath = os.path.join(INLINE_IMAGES_DIR, safe_filename)
+        if not os.path.exists(filepath):
+            return jsonify({'success': False, 'error': '图片不存在'}), 404
+        
+        ext = safe_filename.rsplit('.', 1)[-1].lower()
+        mime_types = {
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'gif': 'image/gif',
+            'webp': 'image/webp'
+        }
+        mime_type = mime_types.get(ext, 'application/octet-stream')
+        
+        from flask import send_file
+        return send_file(filepath, mimetype=mime_type)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
