@@ -1265,25 +1265,36 @@ def sync_email_messages(account_id):
                         # 获取附件内容
                         payload = part.get_payload(decode=True)
                         
-                        # 调试：打印图片部分信息
-                        if content_type.startswith('image/'):
-                            print(f"[调试] 发现图片: cid={content_id}, filename={filename}, disposition={content_disposition}")
+                        # 调试：打印所有非文本部分
+                        if not content_type.startswith('text/'):
+                            print(f"[调试] 非文本部分: type={content_type}, cid={content_id}, filename={filename}, disposition={content_disposition}")
                         
-                        # === 内嵌图片处理 (有 Content-ID 的图片，或 inline 图片) ===
-                        if content_type.startswith('image/'):
+                        # 检查是否是图片（通过 Content-Type 或文件扩展名）
+                        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')
+                        is_image = content_type.startswith('image/') or (filename and filename.lower().endswith(image_extensions))
+                        
+                        # === 内嵌图片处理 ===
+                        if is_image:
+                            # 有 Content-ID 的图片
                             if content_id:
-                                # 有 Content-ID 的内嵌图片
                                 cid = content_id.strip('<>')
+                                # 根据文件扩展名确定实际类型
+                                actual_type = content_type
+                                if filename:
+                                    ext = filename.lower().rsplit('.', 1)[-1]
+                                    type_map = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp', 'bmp': 'image/bmp'}
+                                    if ext in type_map:
+                                        actual_type = type_map[ext]
                                 inline_images[cid] = {
                                     'filename': filename or f"image_{len(inline_images) + 1}",
-                                    'content_type': content_type,
+                                    'content_type': actual_type,
                                     'data': payload,
                                     'size': len(payload) if payload else 0
                                 }
-                                print(f"[调试] 添加内嵌图片: {cid}")
+                                print(f"[调试] 添加内嵌图片(CID): {cid}")
                                 return
+                            # inline disposition 的图片
                             elif 'inline' in content_disposition.lower():
-                                # inline 图片但没有 Content-ID，用文件名作为 key
                                 if filename:
                                     inline_images[filename] = {
                                         'filename': filename,
@@ -1291,8 +1302,18 @@ def sync_email_messages(account_id):
                                         'data': payload,
                                         'size': len(payload) if payload else 0
                                     }
-                                    print(f"[调试] 添加 inline 图片: {filename}")
+                                    print(f"[调试] 添加内嵌图片(inline): {filename}")
                                     return
+                            # 有文件名但没有明确标记为 attachment 的图片，也作为内嵌图片
+                            elif filename and 'attachment' not in content_disposition.lower():
+                                inline_images[filename] = {
+                                    'filename': filename,
+                                    'content_type': content_type,
+                                    'data': payload,
+                                    'size': len(payload) if payload else 0
+                                }
+                                print(f"[调试] 添加内嵌图片(文件名): {filename}")
+                                return
 
                         # === 真正的附件处理 ===
                         if filename or 'attachment' in content_disposition.lower():

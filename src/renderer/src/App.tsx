@@ -3392,8 +3392,21 @@ function EmailView() {
                             {msg.sender_email && (
                               <button
                                 onClick={() => {
-                                  const url = `https://mail.${selectedAccountData.provider === 'gmail' ? 'google' : selectedAccountData.provider === 'qq' ? 'qq' : ''}.com/mail`;
-                                  (window as any).electron?.shell?.openExternal?.(url);
+                                  const subject = encodeURIComponent(`Re: ${msg.subject || ''}`);
+                                  const to = encodeURIComponent(msg.sender_email);
+                                  
+                                  let replyUrl = '';
+                                  if (selectedAccountData?.provider === 'gmail') {
+                                    replyUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${subject}`;
+                                  } else if (selectedAccountData?.provider === 'qq') {
+                                    replyUrl = `https://mail.qq.com/cgi-bin/frame_html?t=compose&to=${to}&subject=${subject}`;
+                                  } else if (selectedAccountData?.provider === '163') {
+                                    replyUrl = `https://mail.163.com/js6/main.jsp?sid=&to=${to}&subject=${subject}`;
+                                  } else {
+                                    replyUrl = `mailto:${msg.sender_email}?subject=${subject}`;
+                                  }
+                                  
+                                  (window as any).electron?.shell?.openExternal?.(replyUrl);
                                 }}
                                 title="网页回复"
                                 style={{
