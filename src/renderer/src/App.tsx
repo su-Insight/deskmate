@@ -2901,7 +2901,12 @@ function EmailView() {
       const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/messages?unread_only=${unreadOnly}`));
       const data = await res.json();
       if (data.success) {
-        setMessages(data.messages || []);
+        const newMessages = data.messages || [];
+        setMessages(newMessages);
+        // 如果当前选中的邮件不在新列表中，清除选中状态
+        if (selectedMessage && !newMessages.find((m: any) => m.id === selectedMessage.id)) {
+          setSelectedMessage(null);
+        }
       }
     } catch (err) {
       console.error('获取邮件失败:', err);
@@ -2956,7 +2961,7 @@ function EmailView() {
       });
       const data = await res.json();
       if (data.success) {
-        // 更新本地状态
+        // 更新本地状态 - 标记为已读但保留在列表中
         setMessages(prev => prev.map(m =>
           m.id === messageId ? { ...m, is_read: true } : m
         ));
@@ -3391,7 +3396,7 @@ function EmailView() {
                             )}
                             {msg.sender_email && (
                               <button
-                                onClick={() => {
+                                onClick={async () => {
                                   const subject = encodeURIComponent(`Re: ${msg.subject || ''}`);
                                   const to = encodeURIComponent(msg.sender_email);
                                   
@@ -3406,7 +3411,12 @@ function EmailView() {
                                     replyUrl = `mailto:${msg.sender_email}?subject=${subject}`;
                                   }
                                   
-                                  (window as any).electron?.shell?.openExternal?.(replyUrl);
+                                  try {
+                                    await (window as any).deskmate?.utils?.openExternal?.(replyUrl);
+                                  } catch (e) {
+                                    console.error('打开链接失败:', e);
+                                    window.open(replyUrl, '_blank');
+                                  }
                                 }}
                                 title="网页回复"
                                 style={{

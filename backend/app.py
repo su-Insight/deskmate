@@ -842,6 +842,20 @@ def get_imap_connection(account):
         else:
             conn = imaplib.IMAP4(account['imap_host'], account['imap_port'])
         conn.login(account['username'], account['password'])
+        
+        # 针对网易系邮箱发送 ID 命令
+        host_str = account.get('imap_host', '').lower()
+        is_netease = any(d in host_str for d in ['163.com', '126.com', '188.com', 'yeah.net'])
+        
+        if is_netease or account.get('provider') in ['163', '126', '188']:
+            try:
+                imaplib.Commands['ID'] = ('AUTH', 'SELECTED')
+                args = ("name", "DeskMate", "version", "1.0.0", "vendor", "DeskMate", "contact", "support@deskmate.local")
+                typ, dat = conn._simple_command('ID', '("' + '" "'.join(args) + '")')
+                print(f"[IMAP] ID命令结果: {typ}")
+            except Exception as e:
+                print(f"[IMAP] ID命令失败(非致命): {e}")
+        
         return conn
     except Exception as e:
         print(f"[IMAP] 连接失败: {e}")
@@ -1202,13 +1216,13 @@ def sync_email_messages(account_id):
         except Exception as e:
             return jsonify({'success': False, 'error': f'连接/登录失败: {str(e)}'}), 500
 
-        # 3. 搜索邮件
-        email_ids = []
+        # 3. 搜索邮件（使用 UID）
+        email_uids = []
         try:
-            # 优先搜索未读，如果没有则不搜索ALL（避免量太大），或者按需策略
-            status, messages = imap_conn.search(None, 'UNSEEN')
+            # 使用 UID SEARCH 搜索未读邮件
+            status, messages = imap_conn.uid('SEARCH', None, 'UNSEEN')
             if status == 'OK':
-                email_ids = messages[0].split()
+                email_uids = messages[0].split()
         except Exception:
             pass
 
@@ -1217,14 +1231,15 @@ def sync_email_messages(account_id):
         now = int(datetime.now().timestamp())
 
         # 限制单次同步数量，防止超时
-        process_ids = email_ids[-20:] if email_ids else [] 
+        process_uids = email_uids[-20:] if email_uids else [] 
         
-        if process_ids:
-            print(f"[邮件同步] 发现 {len(process_ids)} 封未读邮件")
+        if process_uids:
+            print(f"[邮件同步] 发现 {len(process_uids)} 封未读邮件")
 
-        for email_id in process_ids:
+        for uid in process_uids:
             try:
-                status, msg_data = imap_conn.fetch(email_id, '(RFC822)')
+                # 使用 UID FETCH 获取邮件
+                status, msg_data = imap_conn.uid('FETCH', uid, '(RFC822)')
                 if status != 'OK': continue
 
                 raw_email = msg_data[0][1]
@@ -1419,7 +1434,7 @@ def sync_email_messages(account_id):
 
                 msg_uuid = str(uuid.uuid4())
                 
-                uid_str = str(email_id.decode())
+                uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
                 
                 # 构造数据对象 (不包含附件数据，附件单独存储)
                 email_data = {
@@ -1464,7 +1479,7 @@ def sync_email_messages(account_id):
                         print(f"[邮件同步] 邮件已存在: {subject[:30]}")
 
             except Exception as e:
-                print(f"[邮件同步] 处理单封邮件失败 {email_id}: {e}")
+                print(f"[邮件同步] 处理单封邮件失败 {uid}: {e}")
                 continue
 
         imap_conn.logout()
@@ -1722,15 +1737,40 @@ def mark_single_as_read(account_id, msg_id):
         # 连接到 IMAP 并标记该邮件为已读
         try:
             imap_conn = get_imap_connection(dict(account))
-            imap_conn.select('INBOX')
+            select_result = imap_conn.select('INBOX', readonly=False)
+            print(f"[IMAP] 选择INBOX结果: {select_result}")
 
             # 使用 UID 标记已读
             if msg['uid']:
-                try:
-                    imap_conn.uid('STORE', msg['uid'], '+FLAGS', '\\Seen')
-                except:
-                    pass
+                uid = str(msg['uid'])
+                print(f"[IMAP] 尝试标记已读: UID={uid}")
+                
+                # 先查看邮件当前的 FLAGS
+                before_flags = imap_conn.uid('FETCH', uid, '(FLAGS)')
+                print(f"[IMAP] 标记前FLAGS: {before_flags}")
+                
+                # 如果 UID 不存在，尝试用 UID SEARCH 搜索
+                if before_flags[1] == [None] or not before_flags[1]:
+                    print(f"[IMAP] UID {uid} 不存在，使用UID SEARCH搜索...")
+                    status, search_data = imap_conn.uid('SEARCH', None, 'ALL')
+                    print(f"[IMAP] UID SEARCH结果: {status}, {search_data}")
+                    if search_data[0]:
+                        all_uids = search_data[0].split()
+                        print(f"[IMAP] INBOX中共有 {len(all_uids)} 封邮件，UIDs: {all_uids[-5:]}")
+                        # 查看最后几封邮件的 FLAGS
+                        for test_uid in all_uids[-3:]:
+                            test_flags = imap_conn.uid('FETCH', test_uid.decode() if isinstance(test_uid, bytes) else test_uid, '(FLAGS)')
+                            print(f"[IMAP] UID {test_uid}: {test_flags}")
+                
+                # 标记为已读
+                result = imap_conn.uid('STORE', uid, '+FLAGS', '\\Seen')
+                print(f"[IMAP] 标记结果: {result}")
+                
+                # 验证是否标记成功
+                after_flags = imap_conn.uid('FETCH', uid, '(FLAGS)')
+                print(f"[IMAP] 标记后FLAGS: {after_flags}")
 
+            imap_conn.close()
             imap_conn.logout()
         except Exception as e:
             print(f"[IMAP] 标记已读失败: {e}")
