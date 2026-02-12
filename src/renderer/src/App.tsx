@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import ReactDOM from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -184,9 +185,9 @@ function App() {
     { id: 'workspace', icon: 'fa-th' },
     { id: 'files', icon: 'fa-folder' },
     { id: 'secrets', icon: 'fa-key' },
-    { id: 'email', icon: 'fa-envelope' },
     { id: 'tasks', icon: 'fa-check-square' },
     { id: 'calendar', icon: 'fa-calendar' },
+    { id: 'email', icon: 'fa-envelope' },
     { id: 'ai', icon: 'fa-robot' },
   ];
 
@@ -227,6 +228,7 @@ function App() {
         {activeNav === 'secrets' && <SecretsView />}
         {activeNav === 'tasks' && <TasksView />}
         {activeNav === 'calendar' && <CalendarView />}
+        {activeNav === 'email' && <EmailView />}
         {activeNav === 'ai' && (
           <AIChatView
             messages={messages}
@@ -550,6 +552,7 @@ function SecretsView() {
   const [activeSubNav, setActiveSubNav] = useState<'passwords' | 'apikeys' | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterTag, setFilterTag] = useState<string>('all');
+  const [showTagDropdown, setShowTagDropdown] = useState(false);
   const [toast, setToast] = useState<{msg: string, type: string} | null>(null);
 
   // Modal state
@@ -562,20 +565,32 @@ function SecretsView() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{id: string, type: 'password' | 'apikey', title: string} | null>(null);
 
+  // Dropdown position refs
+  const tagDropdownRef = useRef<HTMLDivElement>(null);
+  const platformDropdownRef = useRef<HTMLDivElement>(null);
+  const [tagDropdownPos, setTagDropdownPos] = useState<{top: number, left: number} | null>(null);
+  const [platformDropdownPos, setPlatformDropdownPos] = useState<{top: number, left: number} | null>(null);
+  const [dropdownItems, setDropdownItems] = useState<{type: 'tag' | 'platform', items: string[]} | null>(null);
+
   // Form state
   const [formData, setFormData] = useState({
-    title: '', website: '', password: '', remark: '', tags: '', iconUrl: '',
-    name: '', apiKey: '', platform: 'OpenAI'
+    title: '', website: '', account: '', password: '', remark: '', tags: '', iconUrl: '',
+    name: '', apiKey: '', platform: '', connectionUrl: '',
+    expirationDate: '', expirationNever: true, reminderDays: 0
   });
+  const [showPassword, setShowPassword] = useState(false);
+  const [showApiKeyPassword, setShowApiKeyPassword] = useState(false);
   const [passwordList, setPasswordList] = useState<Array<{
     id: string;
     title: string;
     website: string;
+    account: string;
     password: string;
     remark: string;
     iconUrl: string;
     tags: string[];
     createdAt: number;
+    updatedAt?: number;
   }>>(() => {
     const saved = localStorage.getItem('deskmate_passwords');
     if (saved) {
@@ -595,8 +610,13 @@ function SecretsView() {
     apiKey: string;
     remark: string;
     platform: string;
+    connectionUrl?: string;
+    iconUrl?: string;
+    expirationDate?: string;
+    reminderDays?: number;
     tags: string[];
     createdAt: number;
+    updatedAt?: number;
   }>>(() => {
     const saved = localStorage.getItem('deskmate_apikeys');
     if (saved) {
@@ -620,9 +640,10 @@ function SecretsView() {
 
   const filteredApiKeys = apiKeyList.filter(k => {
     const matchesSearch = k.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          k.remark.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesTag = filterTag === 'all' || k.tags.includes(filterTag);
-    return matchesSearch && matchesTag;
+                          k.remark.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          k.platform.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesPlatform = filterTag === 'all' || k.platform === filterTag;
+    return matchesSearch && matchesPlatform;
   });
 
   // 获取所有标签
@@ -631,13 +652,15 @@ function SecretsView() {
   const allPlatforms = [...new Set(apiKeyList.map(k => k.platform || '其他'))];
 
   // 添加密码
-  const addPassword = (password: { title: string; website: string; password: string; remark: string; iconUrl?: string; tags?: string[] }) => {
+  const addPassword = (password: { title: string; website: string; account?: string; password: string; remark: string; iconUrl?: string; tags?: string[] }) => {
     const newPassword = {
       id: Date.now().toString(),
       ...password,
+      account: password.account || '',
       iconUrl: password.iconUrl || '',
       tags: password.tags || [],
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      updatedAt: Date.now()
     };
     const newList = [...passwordList, newPassword];
     setPasswordList(newList);
@@ -652,8 +675,8 @@ function SecretsView() {
   };
 
   // 更新密码
-  const updatePassword = (id: string, data: { title: string; website: string; password: string; remark: string; iconUrl?: string; tags?: string[] }) => {
-    const newList = passwordList.map(p => p.id === id ? { ...p, ...data, iconUrl: data.iconUrl || p.iconUrl || '', tags: data.tags || p.tags } : p);
+  const updatePassword = (id: string, data: { title: string; website: string; account?: string; password: string; remark: string; iconUrl?: string; tags?: string[] }) => {
+    const newList = passwordList.map(p => p.id === id ? { ...p, ...data, account: data.account || p.account || '', iconUrl: data.iconUrl || p.iconUrl || '', tags: data.tags || p.tags, updatedAt: Date.now() } : p);
     setPasswordList(newList);
     localStorage.setItem('deskmate_passwords', JSON.stringify(newList));
   };
@@ -675,13 +698,28 @@ function SecretsView() {
   };
 
   // 添加 API Key
-  const addApiKey = (apiKey: { name: string; apiKey: string; remark: string; platform?: string; tags?: string[] }) => {
+  const addApiKey = (apiKey: {
+    name: string;
+    apiKey: string;
+    remark: string;
+    platform?: string;
+    connectionUrl?: string;
+    iconUrl?: string;
+    expirationDate?: string;
+    reminderDays?: number;
+    tags?: string[];
+  }) => {
     const newApiKey = {
       id: Date.now().toString(),
       ...apiKey,
       platform: apiKey.platform || '自定义',
+      connectionUrl: apiKey.connectionUrl || '',
+      iconUrl: apiKey.iconUrl || '',
+      expirationDate: apiKey.expirationDate || '',
+      reminderDays: apiKey.reminderDays,
       tags: apiKey.tags || [],
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      updatedAt: Date.now()
     };
     const newList = [...apiKeyList, newApiKey];
     setApiKeyList(newList);
@@ -696,43 +734,139 @@ function SecretsView() {
   };
 
   // 更新 API Key
-  const updateApiKey = (id: string, data: { name: string; apiKey: string; remark: string; platform?: string; tags?: string[] }) => {
-    const newList = apiKeyList.map(k => k.id === id ? { ...k, ...data, platform: data.platform || k.platform, tags: data.tags || k.tags } : k);
+  const updateApiKey = (id: string, data: Partial<{
+    name: string;
+    apiKey: string;
+    remark: string;
+    platform: string;
+    connectionUrl: string;
+    iconUrl: string;
+    expirationDate: string;
+    reminderDays: number;
+    tags: string[];
+  }>) => {
+    const newList = apiKeyList.map(k => k.id === id ? {
+      ...k,
+      ...data,
+      platform: data.platform || k.platform || '自定义',
+      connectionUrl: data.connectionUrl ?? k.connectionUrl ?? '',
+      iconUrl: data.iconUrl ?? k.iconUrl ?? '',
+      expirationDate: data.expirationDate ?? k.expirationDate ?? '',
+      reminderDays: data.reminderDays ?? k.reminderDays,
+      tags: data.tags || k.tags || [],
+      updatedAt: Date.now()
+    } : k);
     setApiKeyList(newList);
     localStorage.setItem('deskmate_apikeys', JSON.stringify(newList));
   };
 
   // 获取网站图标
   const fetchWebsiteIcon = async () => {
-    const website = formData.website.trim();
-    if (!website) {
-      showToast('请先输入网站地址', 'error');
+    // 判断是密码模式还是API Key模式
+    const isPwdMode = activeSubNav === 'passwords';
+    const sourceField = isPwdMode ? formData.website : formData.connectionUrl;
+    const sourceValue = sourceField?.trim();
+
+    if (!sourceValue) {
+      showToast(isPwdMode ? '请先输入网站地址' : '请先输入获取地址', 'error');
       return;
     }
 
     setFetchingIcon(true);
     try {
-      const websiteForFetch = website.startsWith('http') ? website : `https://${website}`;
-      const response = await fetch('/api/icons/extract', {
+      const urlForFetch = sourceValue.startsWith('http') ? sourceValue : `https://${sourceValue}`;
+      console.log('[图标获取] 请求后端 API:', urlForFetch);
+      const response = await fetch(getServerUrl('/api/icons/extract'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ website: websiteForFetch })
+        body: JSON.stringify({ website: urlForFetch })
       });
       const data = await response.json();
+      console.log('[图标获取] 后端返回:', data);
+
       if (data.success && data.icon_url) {
         setFormData({ ...formData, iconUrl: data.icon_url });
         showToast('图标获取成功', 'success');
-      } else {
+      } else if (data.icon_url === null) {
         setFormData({ ...formData, iconUrl: '' });
-        showToast('未找到图标，使用默认图标', 'info');
+        showToast(data.message || '未找到图标', 'info');
+      } else if (data.error) {
+        showToast(data.error, 'error');
       }
     } catch (err) {
       console.error('获取图标失败:', err);
-      showToast('获取图标失败', 'error');
+      showToast(`获取失败: ${err}`, 'error');
     } finally {
       setFetchingIcon(false);
     }
   };
+
+  // 自动获取图标（防抖）- 仅在密码模式下，网站字段变化时自动获取
+  const prevWebsiteRef = useRef('');
+  useEffect(() => {
+    if (activeSubNav !== 'passwords' || !formData.website.trim() || fetchingIcon) {
+      prevWebsiteRef.current = formData.website.trim();
+      return;
+    }
+
+    const website = formData.website.trim();
+    // 只在网站变化且非空时获取
+    if (website && website !== prevWebsiteRef.current) {
+      prevWebsiteRef.current = website;
+      const timer = setTimeout(() => {
+        fetchWebsiteIcon();
+      }, 1500); // 1.5秒防抖
+      return () => clearTimeout(timer);
+    }
+  }, [formData.website, activeSubNav, fetchingIcon]);
+
+  // 自动获取图标（防抖）- 仅在API Key模式下，获取地址字段变化时自动获取
+  const prevConnectionUrlRef = useRef('');
+  useEffect(() => {
+    if (activeSubNav !== 'apikeys' || !formData.connectionUrl.trim() || fetchingIcon) {
+      prevConnectionUrlRef.current = formData.connectionUrl.trim();
+      return;
+    }
+
+    const connectionUrl = formData.connectionUrl.trim();
+    // 只在获取地址变化且非空时获取
+    if (connectionUrl && connectionUrl !== prevConnectionUrlRef.current) {
+      prevConnectionUrlRef.current = connectionUrl;
+      const timer = setTimeout(() => {
+        fetchWebsiteIcon();
+      }, 1500); // 1.5秒防抖
+      return () => clearTimeout(timer);
+    }
+  }, [formData.connectionUrl, activeSubNav, fetchingIcon]);
+
+  // 为列表中的 API Key 获取图标
+  const fetchIconForApiKey = async (id: string, connectionUrl: string) => {
+    const urlForFetch = connectionUrl.startsWith('http') ? connectionUrl : `https://${connectionUrl}`;
+    try {
+      const response = await fetch(getServerUrl('/api/icons/extract'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ website: urlForFetch })
+      });
+      const data = await response.json();
+      if (data.success && data.icon_url) {
+        updateApiKey(id, { iconUrl: data.icon_url });
+      }
+    } catch (err) {
+      console.error('获取图标失败:', err);
+    }
+  };
+
+  // 组件挂载时为没有图标的 API Key 自动获取图标
+  useEffect(() => {
+    if (activeSubNav === 'apikeys') {
+      apiKeyList.forEach(item => {
+        if (item.connectionUrl && !item.iconUrl) {
+          fetchIconForApiKey(item.id, item.connectionUrl);
+        }
+      });
+    }
+  }, [activeSubNav]);
 
   // 格式化时间
   const formatTime = (timestamp: number) => {
@@ -1276,8 +1410,9 @@ function SecretsView() {
               setModalMode('add');
               setEditingId(null);
               setFormData({
-                title: '', website: '', password: '', remark: '', tags: '', iconUrl: '',
-                name: '', apiKey: '', platform: 'OpenAI'
+                title: '', website: '', account: '', password: '', remark: '', tags: '', iconUrl: '',
+                name: '', apiKey: '', platform: '', connectionUrl: '',
+                expirationDate: '', expirationNever: true, reminderDays: 0
               });
               setShowModal(true);
             }}
@@ -1343,7 +1478,8 @@ function SecretsView() {
           padding: '4px',
           background: 'rgba(255, 255, 255, 0.4)',
           borderRadius: '10px',
-          backdropFilter: 'blur(10px)'
+          backdropFilter: 'blur(10px)',
+          alignItems: 'center'
         }}>
           <div
             onClick={() => setFilterTag('all')}
@@ -1354,50 +1490,190 @@ function SecretsView() {
               cursor: 'pointer',
               background: filterTag === 'all' ? (isPasswordMode ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'linear-gradient(135deg, #9D50BB, #6E48AA)') : 'transparent',
               color: filterTag === 'all' ? 'white' : 'var(--text-secondary)',
-              fontWeight: 500
+              fontWeight: 500,
+              whiteSpace: 'nowrap'
             }}
           >
             全部
           </div>
           {isPasswordMode ? (
-            allPasswordTags.slice(0, 3).map(tag => (
-              <div
-                key={tag}
-                onClick={() => setFilterTag(tag)}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  cursor: 'pointer',
-                  background: filterTag === tag ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'transparent',
-                  color: filterTag === tag ? 'white' : 'var(--text-secondary)',
-                  fontWeight: 500
-                }}
-              >
-                {tag}
-              </div>
-            ))
+            (() => {
+              const tags = allPasswordTags;
+              const maxVisible = 3;
+              const visibleTags = tags.slice(0, maxVisible);
+              const hiddenTags = tags.slice(maxVisible);
+
+              return (
+                <>
+                  {visibleTags.map(tag => (
+                    <div
+                      key={tag}
+                      onClick={() => setFilterTag(tag)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        background: filterTag === tag ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'transparent',
+                        color: filterTag === tag ? 'white' : 'var(--text-secondary)',
+                        fontWeight: 500,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {tag}
+                    </div>
+                  ))}
+                  {hiddenTags.length > 0 && (
+                    <div
+                      ref={tagDropdownRef}
+                      onClick={() => {
+                        if (!showTagDropdown && tagDropdownRef.current) {
+                          const rect = tagDropdownRef.current.getBoundingClientRect();
+                          setTagDropdownPos({ top: rect.bottom + 4, left: rect.left });
+                          setDropdownItems({ type: 'tag', items: hiddenTags });
+                        }
+                        setShowTagDropdown(!showTagDropdown);
+                      }}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        background: showTagDropdown ? 'linear-gradient(135deg, #FF8E53, #FF6A00)' : 'rgba(0,0,0,0.05)',
+                        color: showTagDropdown ? 'white' : 'var(--text-secondary)',
+                        fontWeight: 500,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      <i className="fa-solid fa-ellipsis-h" style={{ marginRight: '4px' }}></i>
+                      更多 ({hiddenTags.length})
+                    </div>
+                  )}
+                </>
+              );
+            })()
           ) : (
-            allPlatforms.slice(0, 3).map(platform => (
-              <div
-                key={platform}
-                onClick={() => setFilterTag(platform)}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  cursor: 'pointer',
-                  background: filterTag === platform ? 'linear-gradient(135deg, #9D50BB, #6E48AA)' : 'transparent',
-                  color: filterTag === platform ? 'white' : 'var(--text-secondary)',
-                  fontWeight: 500
-                }}
-              >
-                {platform}
-              </div>
-            ))
+            (() => {
+              const platforms = allPlatforms;
+              const maxVisible = 3;
+              const visiblePlatforms = platforms.slice(0, maxVisible);
+              const hiddenPlatforms = platforms.slice(maxVisible);
+
+              return (
+                <>
+                  {visiblePlatforms.map(platform => (
+                    <div
+                      key={platform}
+                      onClick={() => setFilterTag(platform)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        background: filterTag === platform ? 'linear-gradient(135deg, #9D50BB, #6E48AA)' : 'transparent',
+                        color: filterTag === platform ? 'white' : 'var(--text-secondary)',
+                        fontWeight: 500,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {platform}
+                    </div>
+                  ))}
+                  {hiddenPlatforms.length > 0 && (
+                    <div
+                      ref={platformDropdownRef}
+                      onClick={() => {
+                        if (!showTagDropdown && platformDropdownRef.current) {
+                          const rect = platformDropdownRef.current.getBoundingClientRect();
+                          setPlatformDropdownPos({ top: rect.bottom + 4, left: rect.left });
+                          setDropdownItems({ type: 'platform', items: hiddenPlatforms });
+                        }
+                        setShowTagDropdown(!showTagDropdown);
+                      }}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '8px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        background: showTagDropdown ? 'linear-gradient(135deg, #9D50BB, #6E48AA)' : 'rgba(0,0,0,0.05)',
+                        color: showTagDropdown ? 'white' : 'var(--text-secondary)',
+                        fontWeight: 500,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      <i className="fa-solid fa-ellipsis-h" style={{ marginRight: '4px' }}></i>
+                      更多 ({hiddenPlatforms.length})
+                    </div>
+                  )}
+                </>
+              );
+            })()
           )}
         </div>
       </div>
+
+      {/* 点击其他地方关闭下拉框 */}
+      {showTagDropdown && (
+        <div
+          onClick={() => {
+            setShowTagDropdown(false);
+            setDropdownItems(null);
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9999
+          }}
+        />
+      )}
+
+      {/* 下拉菜单 Portal */}
+      {showTagDropdown && dropdownItems && dropdownItems.items.length > 0 && (
+        ((dropdownItems.type === 'tag' && tagDropdownPos) || (dropdownItems.type === 'platform' && platformDropdownPos)) &&
+        ReactDOM.createPortal(
+          <div style={{
+            position: 'fixed',
+            top: dropdownItems.type === 'tag' ? tagDropdownPos!.top : platformDropdownPos!.top,
+            left: dropdownItems.type === 'tag' ? tagDropdownPos!.left : platformDropdownPos!.left,
+            background: 'white',
+            borderRadius: '10px',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+            padding: '8px',
+            zIndex: 10000,
+            minWidth: '150px',
+            maxHeight: '200px',
+            overflowY: 'auto'
+          }}>
+            {dropdownItems.items.map(item => (
+              <div
+                key={item}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setFilterTag(item);
+                  setShowTagDropdown(false);
+                  setDropdownItems(null);
+                }}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  background: filterTag === item
+                    ? (dropdownItems.type === 'tag' ? 'rgba(255, 142, 83, 0.1)' : 'rgba(157, 80, 187, 0.1)')
+                    : 'transparent',
+                  color: filterTag === item
+                    ? (dropdownItems.type === 'tag' ? '#FF6A00' : '#9D50BB')
+                    : 'var(--text-secondary)',
+                  fontWeight: 500
+                }}
+              >
+                {item}
+              </div>
+            ))}
+          </div>,
+          document.body
+        )
+      )}
 
       {/* 列表 */}
       <div className="card" style={{ padding: '0' }}>
@@ -1433,23 +1709,27 @@ function SecretsView() {
             </p>
           </div>
         ) : (
-          <div style={{ padding: '12px' }}>
+          <div style={{ background: 'transparent', padding: '4px 0' }}>
             {currentList.map((item, index) => (
               <div
                 key={item.id}
+                className="list-item-hover"
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  padding: '16px',
-                  background: 'rgba(255, 255, 255, 0.5)',
-                  borderRadius: '12px',
-                  marginBottom: index < currentList.length - 1 ? '8px' : '0',
-                  border: '1px solid rgba(255, 255, 255, 0.3)',
-                  transition: 'all 0.2s ease'
+                  padding: '14px 16px',
+                  background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.85) 100%)',
+                  borderRadius: '6px',
+                  marginBottom: index < currentList.length - 1 ? '10px' : '0',
+                  border: '1px solid rgba(255, 255, 255, 0.5)',
+                  boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)',
+                  transition: 'all 0.2s ease',
+                  cursor: 'pointer',
+                  marginLeft: '8px'
                 }}
               >
                 {/* 图标 */}
-                {isPasswordMode && (item as any).iconUrl ? (
+                {(isPasswordMode || (item as any).iconUrl || (!isPasswordMode && (item as any).connectionUrl)) ? (
                   <div
                     style={{
                       width: '44px',
@@ -1460,17 +1740,23 @@ function SecretsView() {
                       alignItems: 'center',
                       justifyContent: 'center',
                       marginRight: '14px',
+                      marginLeft: '8px',
                       flexShrink: 0,
-                      background: 'rgba(255, 255, 255, 0.8)',
-                      border: '1px solid rgba(0, 0, 0, 0.08)'
+                      background: 'rgba(255, 255, 255, 0.9)',
+                      border: '1px solid rgba(255, 255, 255, 0.5)',
+                      boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)'
                     }}
                   >
-                    <img
-                      src={(item as any).iconUrl}
-                      alt="网站图标"
-                      style={{ width: '28px', height: '28px', objectFit: 'contain' }}
-                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                    />
+                    {(item as any).iconUrl ? (
+                      <img
+                        src={(item as any).iconUrl}
+                        alt="网站图标"
+                        style={{ width: '28px', height: '28px', objectFit: 'contain' }}
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                      />
+                    ) : (
+                      <i className="fa-solid fa-key" style={{ fontSize: '16px', color: '#9D50BB' }}></i>
+                    )}
                   </div>
                 ) : (
                   <div
@@ -1478,20 +1764,23 @@ function SecretsView() {
                       width: '44px',
                       height: '44px',
                       borderRadius: '12px',
-                      background: isPasswordMode
-                        ? 'linear-gradient(135deg, #FF8E53, #FF6A00)'
-                        : (item.platform === 'OpenAI' ? 'linear-gradient(135deg, #10A37F, #0D8A6A)'
-                          : item.platform === 'Claude' ? 'linear-gradient(135deg, #D97757, #C46547)'
-                          : item.platform === 'DeepSeek' ? 'linear-gradient(135deg, #00C7B7, #00A89A)'
-                          : 'linear-gradient(135deg, #9D50BB, #6E48AA)'),
+                      marginRight: '14px',
+                      marginLeft: '8px',
+                      flexShrink: 0,
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      marginRight: '14px',
-                      flexShrink: 0
+                      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+                      background: (() => {
+                        const platform = (item as any).platform;
+                        if (platform === 'OpenAI') return 'linear-gradient(135deg, #10A37F, #0D8A6A)';
+                        if (platform === 'Claude') return 'linear-gradient(135deg, #D97757, #C46547)';
+                        if (platform === 'DeepSeek') return 'linear-gradient(135deg, #00C7B7, #00A89A)';
+                        return 'linear-gradient(135deg, #9D50BB, #6E48AA)';
+                      })()
                     }}
                   >
-                    <i className={`fa-solid ${isPasswordMode ? 'fa-lock' : 'fa-key'}`} style={{ fontSize: '18px', color: 'white' }}></i>
+                    <i className="fa-solid fa-key" style={{ fontSize: '18px', color: 'white' }}></i>
                   </div>
                 )}
 
@@ -1528,9 +1817,25 @@ function SecretsView() {
                   }}>
                     {isPasswordMode ? (
                       <>
-                        <span><i className="fa-solid fa-globe" style={{ marginRight: '4px' }}></i>{(item as any).website || '-'}</span>
+                        {(item as any).account && (
+                          <span><i className="fa-solid fa-user" style={{ marginRight: '4px' }}></i>{(item as any).account}</span>
+                        )}
+                        {(item as any).website && (
+                          <span style={{
+                            maxWidth: '180px',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            display: 'inline-block',
+                            verticalAlign: 'bottom',
+                            marginLeft: '16px'
+                          }}><i className="fa-solid fa-globe" style={{ marginRight: '4px' }}></i>{(item as any).website}</span>
+                        )}
                         {(item as any).remark && (
                           <span style={{ color: 'var(--text-muted)' }}>· {(item as any).remark}</span>
+                        )}
+                        {!isPasswordMode && !(item as any).account && !(item as any).website && (
+                          <span style={{ color: 'var(--text-muted)' }}>-</span>
                         )}
                       </>
                     ) : (
@@ -1538,22 +1843,118 @@ function SecretsView() {
                         <span style={{
                           fontFamily: 'monospace',
                           background: 'rgba(0,0,0,0.05)',
-                          padding: '2px 6px',
+                          padding: '2px 8px',
                           borderRadius: '4px',
-                          maxWidth: '120px',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
+                          fontSize: '13px',
+                          fontWeight: 500,
+                          letterSpacing: '0.5px'
                         }}>
-                          {(item as any).apiKey.substring(0, 12)}...
+                          {(() => {
+                            const key = (item as any).apiKey;
+                            if (!key) return '-';
+                            if (key.length <= 10) return key;
+                            return `${key.substring(0, 5)}...${key.substring(key.length - 5)}`;
+                          })()}
                         </span>
+                        {(item as any).connectionUrl && (
+                          <span
+                            style={{
+                              color: 'var(--text-muted)',
+                              fontSize: '12px',
+                              marginLeft: '8px',
+                              cursor: 'pointer'
+                            }}
+                            title="打开链接"
+                            onClick={() => {
+                              const url = (item as any).connectionUrl;
+                              if (url) {
+                                const electronShell = (window as any).electron?.shell?.openExternal;
+                                if (electronShell) {
+                                  electronShell(url);
+                                } else {
+                                  window.open(url, '_blank');
+                                }
+                              }
+                            }}
+                          >
+                            <i className="fa-solid fa-link" style={{ marginRight: '3px', opacity: 0.6 }}></i>
+                          </span>
+                        )}
                         {(item as any).remark && (
-                          <span style={{ color: 'var(--text-muted)' }}>· {(item as any).remark}</span>
+                          <span style={{ color: 'var(--text-muted)', marginLeft: '8px' }}>· {(item as any).remark}</span>
+                        )}
+                        {/* 过期时间 */}
+                        {!(item as any).expirationDate ? (
+                          <span style={{
+                            marginLeft: '10px',
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            fontSize: '11px',
+                            fontWeight: 500,
+                            background: 'rgba(16, 185, 129, 0.1)',
+                            color: '#10B981'
+                          }}>
+                            <i className="fa-solid fa-infinity" style={{ marginRight: '4px', opacity: 0.7 }}></i>
+                            永不过期
+                          </span>
+                        ) : (item as any).expirationDate && (
+                          <span style={{
+                            marginLeft: '10px',
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            fontSize: '11px',
+                            fontWeight: 500,
+                            background: (() => {
+                              const expDate = new Date((item as any).expirationDate);
+                              const now = new Date();
+                              const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                              if (daysLeft < 0) return 'rgba(239, 68, 68, 0.15)';
+                              if (daysLeft <= 7) return 'rgba(245, 158, 11, 0.15)';
+                              if (daysLeft <= 30) return 'rgba(16, 185, 129, 0.15)';
+                              return 'rgba(107, 114, 128, 0.1)';
+                            })(),
+                            color: (() => {
+                              const expDate = new Date((item as any).expirationDate);
+                              const now = new Date();
+                              const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                              if (daysLeft < 0) return '#EF4444';
+                              if (daysLeft <= 7) return '#F59E0B';
+                              if (daysLeft <= 30) return '#10B981';
+                              return '#6B7280';
+                            })()
+                          }}>
+                            <i className="fa-solid fa-clock" style={{ marginRight: '4px', opacity: 0.7 }}></i>
+                            {(() => {
+                              const expDate = new Date((item as any).expirationDate);
+                              const now = new Date();
+                              const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                              if (daysLeft < 0) return `已过期`;
+                              if (daysLeft === 0) return `今天过期`;
+                              if (daysLeft === 1) return `明天过期`;
+                              if (daysLeft <= 7) return `${daysLeft}天后过期`;
+                              if (daysLeft <= 30) return `${Math.ceil(daysLeft / 7)}周后过期`;
+                              return `${formatTime((item as any).expirationDate)}到期`;
+                            })()}
+                          </span>
+                        )}
+                        {/* 提醒时间 - 只在启用提醒时显示 */}
+                        {(item as any).expirationDate && (item as any).reminderDays > 0 && (
+                          <span style={{
+                            marginLeft: '6px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            fontSize: '10px',
+                            background: 'rgba(96, 165, 250, 0.1)',
+                            color: '#60A5FA'
+                          }}>
+                            提前{(item as any).reminderDays}天提醒
+                          </span>
                         )}
                       </>
                     )}
-                    <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>
-                      {formatTime(item.createdAt)}
+                    <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <i className="fa-solid fa-pen-to-square" style={{ opacity: 0.5, fontSize: '10px' }}></i>
+                      {formatTime(item.updatedAt || item.createdAt)}
                     </span>
                   </div>
                 </div>
@@ -1568,14 +1969,19 @@ function SecretsView() {
                       if (isPasswordMode) {
                         const p = item as any;
                         setFormData({
-                          title: p.title, website: p.website || '', password: p.password, remark: p.remark || '', tags: (p.tags || []).join(', '), iconUrl: p.iconUrl || '',
-                          name: '', apiKey: '', platform: 'OpenAI'
+                          title: p.title, website: p.website || '', account: p.account || '', password: p.password, remark: p.remark || '', tags: (p.tags || []).join(', '), iconUrl: p.iconUrl || '',
+                          name: '', apiKey: '', platform: '', connectionUrl: '',
+                          expirationDate: '', expirationNever: true, reminderDays: 0
                         });
                       } else {
                         const k = item as any;
                         setFormData({
-                          title: '', website: '', password: '', remark: '', tags: '', iconUrl: '',
-                          name: k.name, apiKey: k.apiKey, platform: k.platform || 'OpenAI'
+                          title: '', website: '', account: '', password: '', remark: '', tags: '', iconUrl: k.iconUrl || '',
+                          name: k.name, apiKey: k.apiKey, platform: k.platform || '',
+                          connectionUrl: k.connectionUrl || '',
+                          expirationDate: k.expirationDate || '',
+                          expirationNever: !k.expirationDate,
+                          reminderDays: k.reminderDays ?? 0
                         });
                       }
                       setShowModal(true);
@@ -1618,17 +2024,17 @@ function SecretsView() {
         )}
       </div>
 
-      {/* Add/Edit Modal */}
-      {showModal && (
+      {/* Add/Edit Modal - Portal */}
+      {showModal && ReactDOM.createPortal(
         <div style={{
           position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
+          inset: 0,
           background: 'rgba(0, 0, 0, 0.5)',
           backdropFilter: 'blur(4px)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          zIndex: 9999
+          zIndex: 10000
         }} onClick={() => setShowModal(false)}>
           <div
             className="card"
@@ -1641,7 +2047,7 @@ function SecretsView() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Modal Header */}
+            {/* Modal Header with Icon */}
             <div style={{
               padding: '20px 24px',
               borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
@@ -1692,8 +2098,84 @@ function SecretsView() {
               </div>
             </div>
 
+            {/* Website Icon Display */}
+            {isPasswordMode && (
+              <div style={{
+                padding: '24px 24px 16px 24px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '12px'
+              }}>
+                {/* Large Icon */}
+                <div style={{
+                  width: '64px',
+                  height: '64px',
+                  borderRadius: '16px',
+                  background: 'rgba(255, 255, 255, 0.9)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.1)',
+                  border: '1px solid rgba(0, 0, 0, 0.08)',
+                  overflow: 'hidden'
+                }}>
+                  {fetchingIcon ? (
+                    <i className="fa-solid fa-circle-notch fa-spin" style={{ fontSize: '28px', color: '#FF8E53' }}></i>
+                  ) : formData.iconUrl ? (
+                    <img
+                      src={formData.iconUrl}
+                      alt="网站图标"
+                      style={{ width: '40px', height: '40px', objectFit: 'contain' }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  ) : (
+                    <i className="fa-solid fa-globe" style={{ fontSize: '28px', color: '#FF8E53' }}></i>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* API Key Icon Display */}
+            {!isPasswordMode && (
+              <div style={{
+                padding: '24px 24px 16px 24px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '12px'
+              }}>
+                {/* Large Icon */}
+                <div style={{
+                  width: '64px',
+                  height: '64px',
+                  borderRadius: '16px',
+                  background: 'rgba(255, 255, 255, 0.9)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.1)',
+                  border: '1px solid rgba(0, 0, 0, 0.08)',
+                  overflow: 'hidden'
+                }}>
+                  {fetchingIcon ? (
+                    <i className="fa-solid fa-circle-notch fa-spin" style={{ fontSize: '28px', color: '#9D50BB' }}></i>
+                  ) : formData.iconUrl ? (
+                    <img
+                      src={formData.iconUrl}
+                      alt="网站图标"
+                      style={{ width: '40px', height: '40px', objectFit: 'contain' }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                    />
+                  ) : (
+                    <i className="fa-solid fa-link" style={{ fontSize: '28px', color: '#9D50BB' }}></i>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Form */}
-            <div style={{ padding: '24px' }}>
+            <div style={{ padding: isPasswordMode ? '0 24px 24px 24px' : '24px' }}>
               {isPasswordMode ? (
                 <>
                   {/* 密码表单 */}
@@ -1721,62 +2203,51 @@ function SecretsView() {
 
                   <div style={{ marginBottom: '16px' }}>
                     <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      账号
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.account}
+                      onChange={(e) => setFormData({ ...formData, account: e.target.value })}
+                      placeholder="例如：my@email.com 或用户名"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
                       网站
                     </label>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      <input
-                        type="text"
-                        value={formData.website}
-                        onChange={(e) => setFormData({ ...formData, website: e.target.value })}
-                        placeholder="例如：github.com"
-                        style={{
-                          flex: 1,
-                          padding: '12px 14px',
-                          border: '1px solid rgba(0, 0, 0, 0.1)',
-                          borderRadius: '10px',
-                          fontSize: '14px',
-                          background: 'rgba(255, 255, 255, 0.8)',
-                          outline: 'none',
-                          boxSizing: 'border-box'
-                        }}
-                      />
-                      <div
-                        onClick={fetchWebsiteIcon}
-                        style={{
-                          padding: '10px 14px',
-                          borderRadius: '10px',
-                          background: fetchingIcon ? '#9CA3AF' : 'linear-gradient(135deg, #3B82F6, #2563EB)',
-                          color: 'white',
-                          fontSize: '12px',
-                          fontWeight: 500,
-                          cursor: fetchingIcon ? 'not-allowed' : 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          whiteSpace: 'nowrap',
-                          transition: 'all 0.2s'
-                        }}
-                      >
-                        <i className={`fa-solid ${fetchingIcon ? 'fa-spinner fa-spin' : 'fa-image'}`}></i>
-                        {fetchingIcon ? '获取中...' : '获取图标'}
-                      </div>
-                    </div>
-                    {/* 图标预览 */}
-                    {formData.iconUrl && (
-                      <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <img
-                          src={formData.iconUrl}
-                          alt="网站图标"
-                          style={{ width: '24px', height: '24px', borderRadius: '4px', objectFit: 'contain' }}
-                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                        />
-                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{formData.iconUrl}</span>
-                        <div
-                          onClick={() => setFormData({ ...formData, iconUrl: '' })}
-                          style={{ cursor: 'pointer', color: 'var(--text-muted)', marginLeft: 'auto' }}
-                        >
-                          <i className="fa-solid fa-times"></i>
-                        </div>
+                    <input
+                      type="text"
+                      value={formData.website}
+                      onChange={(e) => setFormData({ ...formData, website: e.target.value })}
+                      placeholder="例如：github.com"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                    {/* 提示：正在获取图标 */}
+                    {fetchingIcon && (
+                      <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#3B82F6' }}>
+                        <i className="fa-solid fa-circle-notch fa-spin"></i>
+                        正在获取网站图标...
                       </div>
                     )}
                   </div>
@@ -1787,7 +2258,7 @@ function SecretsView() {
                     </label>
                     <div style={{ position: 'relative' }}>
                       <input
-                        type={formData.password ? 'text' : 'password'}
+                        type={showPassword ? 'text' : 'password'}
                         value={formData.password}
                         onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                         placeholder="输入密码"
@@ -1804,7 +2275,7 @@ function SecretsView() {
                         }}
                       />
                       <div
-                        onClick={() => setFormData({ ...formData, password: formData.password ? '' : formData.password })}
+                        onClick={() => setShowPassword(!showPassword)}
                         style={{
                           position: 'absolute',
                           right: '12px',
@@ -1814,7 +2285,7 @@ function SecretsView() {
                           color: 'var(--text-secondary)'
                         }}
                       >
-                        <i className={`fa-solid ${formData.password ? 'fa-eye' : 'fa-eye-slash'}`}></i>
+                        <i className={`fa-solid ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
                       </div>
                     </div>
                   </div>
@@ -1868,11 +2339,13 @@ function SecretsView() {
 
                   <div style={{ marginBottom: '16px' }}>
                     <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                      平台
+                      平台 <span style={{ color: '#EF4444' }}>*</span>
                     </label>
-                    <select
+                    <input
+                      type="text"
                       value={formData.platform}
                       onChange={(e) => setFormData({ ...formData, platform: e.target.value })}
+                      placeholder="例如：OpenAI、Claude、DeepSeek"
                       style={{
                         width: '100%',
                         padding: '12px 14px',
@@ -1881,19 +2354,9 @@ function SecretsView() {
                         fontSize: '14px',
                         background: 'rgba(255, 255, 255, 0.8)',
                         outline: 'none',
-                        boxSizing: 'border-box',
-                        cursor: 'pointer'
+                        boxSizing: 'border-box'
                       }}
-                    >
-                      <option value="OpenAI">OpenAI</option>
-                      <option value="Claude">Claude</option>
-                      <option value="DeepSeek">DeepSeek</option>
-                      <option value="SiliconFlow">SiliconFlow</option>
-                      <option value="Google">Google</option>
-                      <option value="Anthropic">Anthropic</option>
-                      <option value="Azure">Azure</option>
-                      <option value="自定义">自定义</option>
-                    </select>
+                    />
                   </div>
 
                   <div style={{ marginBottom: '16px' }}>
@@ -1902,7 +2365,7 @@ function SecretsView() {
                     </label>
                     <div style={{ position: 'relative' }}>
                       <input
-                        type={formData.apiKey ? 'text' : 'password'}
+                        type={showApiKeyPassword ? 'text' : 'password'}
                         value={formData.apiKey}
                         onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
                         placeholder="sk-..."
@@ -1920,7 +2383,7 @@ function SecretsView() {
                         }}
                       />
                       <div
-                        onClick={() => setFormData({ ...formData, apiKey: formData.apiKey ? '' : formData.apiKey })}
+                        onClick={() => setShowApiKeyPassword(!showApiKeyPassword)}
                         style={{
                           position: 'absolute',
                           right: '12px',
@@ -1930,14 +2393,120 @@ function SecretsView() {
                           color: 'var(--text-secondary)'
                         }}
                       >
-                        <i className={`fa-solid ${formData.apiKey ? 'fa-eye' : 'fa-eye-slash'}`}></i>
+                        <i className={`fa-solid ${showApiKeyPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
                       </div>
                     </div>
                   </div>
 
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      获取地址 <span style={{ color: '#9CA3AF' }}>(可选)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.connectionUrl}
+                      onChange={(e) => setFormData({ ...formData, connectionUrl: e.target.value })}
+                      placeholder="例如：https://api.openai.com/v1"
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(0, 0, 0, 0.1)',
+                        borderRadius: '10px',
+                        fontSize: '14px',
+                        background: 'rgba(255, 255, 255, 0.8)',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  {/* 过期时间 */}
+                  <div style={{ marginBottom: '16px' }}>
+                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      过期时间 <span style={{ color: '#9CA3AF' }}>(可选)</span>
+                    </label>
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                      <input
+                        type={formData.expirationNever ? 'text' : 'date'}
+                        value={formData.expirationNever ? '' : formData.expirationDate}
+                        onChange={(e) => setFormData({ ...formData, expirationDate: e.target.value })}
+                        disabled={formData.expirationNever}
+                        style={{
+                          flex: 1,
+                          padding: '12px 14px',
+                          border: '1px solid rgba(0, 0, 0, 0.1)',
+                          borderRadius: '10px',
+                          fontSize: '14px',
+                          background: formData.expirationNever ? 'rgba(0, 0, 0, 0.03)' : 'rgba(255, 255, 255, 0.8)',
+                          outline: 'none',
+                          boxSizing: 'border-box',
+                          cursor: formData.expirationNever ? 'not-allowed' : 'pointer'
+                        }}
+                      />
+                      <label style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '10px 14px',
+                        background: formData.expirationNever ? 'rgba(16, 185, 129, 0.1)' : 'rgba(0, 0, 0, 0.03)',
+                        borderRadius: '10px',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        color: formData.expirationNever ? '#10B981' : 'var(--text-secondary)',
+                        fontWeight: 500,
+                        transition: 'all 0.2s ease'
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={formData.expirationNever}
+                          onChange={(e) => setFormData({ ...formData, expirationNever: e.target.checked })}
+                          style={{ display: 'none' }}
+                        />
+                        <i className={`fa-solid ${formData.expirationNever ? 'fa-check-circle' : 'fa-circle'}`}></i>
+                        永不过期
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* 过期提醒 - 只在设置了过期时间且非永不过期时显示 */}
+                  {!formData.expirationNever && formData.expirationDate && (
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                        过期提醒 <span style={{ color: '#9CA3AF', fontWeight: 400 }}>(可选)</span>
+                      </label>
+                      <select
+                        value={formData.reminderDays}
+                        onChange={(e) => {
+                          const value = parseInt(e.target.value);
+                          setFormData({
+                            ...formData,
+                            reminderDays: value
+                          });
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '12px 14px',
+                          border: '1px solid rgba(0, 0, 0, 0.1)',
+                          borderRadius: '10px',
+                          fontSize: '14px',
+                          background: 'rgba(255, 255, 255, 0.8)',
+                          outline: 'none',
+                          boxSizing: 'border-box',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <option value={0}>-- 不提醒 --</option>
+                        <option value={30}>提前 1 个月提醒</option>
+                        <option value={7}>提前 7 天提醒</option>
+                        <option value={3}>提前 3 天提醒</option>
+                        <option value={1}>提前 1 天提醒</option>
+                      </select>
+                    </div>
+                  )}
+
                   <div style={{ marginBottom: '20px' }}>
                     <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                      备注
+                      备注 <span style={{ color: '#9CA3AF' }}>(可选)</span>
                     </label>
                     <input
                       type="text"
@@ -1980,16 +2549,29 @@ function SecretsView() {
                 </div>
                 <div
                   onClick={() => {
-                    const isValid = isPasswordMode ? formData.title && formData.password : formData.name && formData.apiKey;
+                    const isValid = isPasswordMode
+                      ? formData.title && formData.password
+                      : formData.name && formData.apiKey;
                     if (!isValid) {
                       showToast('请填写必填项', 'error');
                       return;
+                    }
+                    // 验证过期提醒时间
+                    if (!isPasswordMode && !formData.expirationNever && formData.expirationDate && formData.reminderDays > 0) {
+                      const expDate = new Date(formData.expirationDate);
+                      const now = new Date();
+                      const daysUntilExpiry = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                      if (daysUntilExpiry < formData.reminderDays) {
+                        showToast(`提醒时间不能晚于过期时间（剩余${daysUntilExpiry}天）`, 'error');
+                        return;
+                      }
                     }
                     if (modalMode === 'add') {
                       if (isPasswordMode) {
                         addPassword({
                           title: formData.title,
                           website: formData.website,
+                          account: formData.account,
                           password: formData.password,
                           remark: formData.remark,
                           iconUrl: formData.iconUrl
@@ -2000,6 +2582,10 @@ function SecretsView() {
                           name: formData.name,
                           apiKey: formData.apiKey,
                           platform: formData.platform,
+                          connectionUrl: formData.connectionUrl,
+                          iconUrl: formData.iconUrl,
+                          expirationDate: formData.expirationNever ? '' : formData.expirationDate,
+                          reminderDays: formData.reminderDays,
                           remark: formData.remark
                         });
                         showToast('API Key 添加成功', 'success');
@@ -2009,6 +2595,7 @@ function SecretsView() {
                         updatePassword(editingId, {
                           title: formData.title,
                           website: formData.website,
+                          account: formData.account,
                           password: formData.password,
                           remark: formData.remark,
                           iconUrl: formData.iconUrl
@@ -2019,6 +2606,10 @@ function SecretsView() {
                           name: formData.name,
                           apiKey: formData.apiKey,
                           platform: formData.platform,
+                          connectionUrl: formData.connectionUrl,
+                          iconUrl: formData.iconUrl,
+                          expirationDate: formData.expirationNever ? '' : formData.expirationDate,
+                          reminderDays: formData.reminderDays,
                           remark: formData.remark
                         });
                         showToast('API Key 已更新', 'success');
@@ -2044,33 +2635,37 @@ function SecretsView() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      {/* Toast */}
-      {toast && (
+      {/* Toast - Portal */}
+      {toast && ReactDOM.createPortal(
         <div style={{
           position: 'fixed',
-          top: '80px',
+          top: '50%',
           left: '50%',
-          transform: 'translateX(-50%)',
-          padding: '12px 24px',
+          transform: 'translate(-50%, -50%)',
+          padding: '14px 28px',
           background: toast.type === 'success' ? '#10B981' : '#EF4444',
           color: 'white',
-          borderRadius: '10px',
-          fontSize: '13px',
+          borderRadius: '12px',
+          fontSize: '14px',
           fontWeight: 500,
-          boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
-          zIndex: 9999,
-          animation: 'fadeInOut 2s ease-in-out'
+          boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
+          zIndex: 10000,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
         }}>
-          <i className="fa-solid fa-check-circle" style={{ marginRight: '8px' }}></i>
+          <i className={`fa-solid ${toast.type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'}`}></i>
           {toast.msg}
-        </div>
+        </div>,
+        document.body
       )}
 
-      {/* Delete Confirmation Modal */}
-      {showDeleteModal && deleteTarget && (
+      {/* Delete Confirmation Modal - Portal */}
+      {showDeleteModal && deleteTarget && ReactDOM.createPortal(
         <div style={{
           position: 'fixed',
           top: 0, left: 0, right: 0, bottom: 0,
@@ -2166,7 +2761,1230 @@ function SecretsView() {
               </div>
             </div>
           </div>
+        </div>,
+        document.body
+      )}
+
+    </>
+  );
+}
+
+// ============================================
+// 邮箱视图
+// ============================================
+function EmailView() {
+  const [accounts, setAccounts] = useState<Array<{
+    id: string;
+    email: string;
+    provider: string;
+    unread_count: number;
+    created_at: number;
+  }>>([]);
+  const [providers, setProviders] = useState<Array<{id: string, name: string, icon: string}>>([]);
+  const [loading, setLoading] = useState(true);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<{
+    id: string;
+    email: string;
+    provider: string;
+    password?: string;
+  } | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
+  const [selectedMessage, setSelectedMessage] = useState<any>(null);
+  const [messages, setMessages] = useState<Array<any>>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [showToast, setShowToast] = useState<{msg: string, type: string} | null>(null);
+
+  // 添加邮箱表单
+  const [newEmail, setNewEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newProvider, setNewProvider] = useState('');
+  const [adding, setAdding] = useState(false);
+
+  // 编辑邮箱表单
+  const [editEmail, setEditEmail] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editProvider, setEditProvider] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [showEditPassword, setShowEditPassword] = useState(false);
+
+  // 打开编辑弹窗
+  const handleEditAccount = async (account: any) => {
+    setEditingAccount(account);
+    setEditEmail(account.email);
+    setEditProvider(account.provider);
+    setShowEditPassword(false);
+
+    // 获取账户详情（包括密码）
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${account.id}`));
+      const data = await res.json();
+      if (data.success) {
+        setEditPassword(data.account.password || '');
+      } else {
+        setEditPassword('');
+      }
+    } catch {
+      setEditPassword('');
+    }
+
+    setShowEditModal(true);
+  };
+
+  // 保存编辑
+  const handleSaveEdit = async () => {
+    if (!editingAccount || !editEmail || !editProvider) {
+      setShowToast({ msg: '请填写完整信息', type: 'error' });
+      return;
+    }
+
+    setEditing(true);
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${editingAccount.id}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: editEmail,
+          provider: editProvider,
+          password: editPassword || undefined
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShowToast({ msg: '更新成功', type: 'success' });
+        setShowEditModal(false);
+        fetchAccounts();
+      } else {
+        setShowToast({ msg: data.error || '更新失败', type: 'error' });
+      }
+    } catch (err) {
+      setShowToast({ msg: '更新失败', type: 'error' });
+    } finally {
+      setEditing(false);
+    }
+  };
+
+  // 获取所有邮箱提供商
+  const fetchProviders = async () => {
+    try {
+      const res = await fetch(getServerUrl('/api/email/providers'));
+      const data = await res.json();
+      if (data.success) {
+        setProviders(data.providers);
+      }
+    } catch (err) {
+      console.error('获取邮箱提供商失败:', err);
+    }
+  };
+
+  // 获取所有邮箱账户
+  const fetchAccounts = async () => {
+    try {
+      const res = await fetch(getServerUrl('/api/email/accounts'));
+      const data = await res.json();
+      if (data.success) {
+        setAccounts(data.accounts);
+      }
+    } catch (err) {
+      console.error('获取邮箱账户失败:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 获取邮件列表
+  const fetchMessages = async (accountId: string, unreadOnly = false) => {
+    setMessagesLoading(true);
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/messages?unread_only=${unreadOnly}`));
+      const data = await res.json();
+      if (data.success) {
+        setMessages(data.messages);
+      }
+    } catch (err) {
+      console.error('获取邮件失败:', err);
+    } finally {
+      setMessagesLoading(false);
+    }
+  };
+
+  // 同步邮件
+  const syncEmails = async (accountId: string) => {
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/sync`), { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setShowToast({ msg: `同步成功，获取 ${data.fetched} 封新邮件`, type: 'success' });
+        fetchAccounts();
+        if (selectedAccount === accountId) {
+          fetchMessages(accountId, true);
+        }
+      } else {
+        setShowToast({ msg: data.error || '同步失败', type: 'error' });
+      }
+    } catch (err) {
+      setShowToast({ msg: '同步失败', type: 'error' });
+    }
+  };
+
+  // 一键已读
+  const markAllAsRead = async (accountId: string) => {
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/mark-read`), { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setShowToast({ msg: '已标记全部为已读', type: 'success' });
+        fetchAccounts();
+        fetchMessages(accountId, true);
+      }
+    } catch (err) {
+      setShowToast({ msg: '操作失败', type: 'error' });
+    }
+  };
+
+  // 单个标记为已读
+  const markAsRead = async (accountId: string, messageId: string) => {
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${accountId}/mark-read/${messageId}`), {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (data.success) {
+        // 更新本地状态
+        setMessages(prev => prev.map(m =>
+          m.id === messageId ? { ...m, is_read: true } : m
+        ));
+        fetchAccounts();
+      }
+    } catch (err) {
+      console.error('标记已读失败:', err);
+    }
+  };
+
+  // 添加邮箱
+  const handleAddEmail = async () => {
+    if (!newEmail || !newPassword || !newProvider) {
+      setShowToast({ msg: '请填写完整信息', type: 'error' });
+      return;
+    }
+
+    setAdding(true);
+    try {
+      const res = await fetch(getServerUrl('/api/email/accounts'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: newEmail, password: newPassword, provider: newProvider })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShowToast({ msg: '邮箱添加成功', type: 'success' });
+        setShowAddModal(false);
+        setNewEmail('');
+        setNewPassword('');
+        setNewProvider('');
+        fetchAccounts();
+      } else {
+        setShowToast({ msg: data.error || '添加失败', type: 'error' });
+      }
+    } catch (err) {
+      setShowToast({ msg: '添加失败', type: 'error' });
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  // 删除邮箱确认
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
+
+  // 打开删除确认弹窗
+  const confirmDeleteAccount = (accountId: string) => {
+    setAccountToDelete(accountId);
+    setShowDeleteConfirm(true);
+  };
+
+  // 执行删除
+  const handleDeleteAccount = async () => {
+    if (!accountToDelete) return;
+
+    try {
+      const res = await fetch(getServerUrl(`/api/email/accounts/${accountToDelete}`), { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setShowToast({ msg: '删除成功', type: 'success' });
+        if (selectedAccount === accountToDelete) {
+          setSelectedAccount(null);
+        }
+        fetchAccounts();
+      }
+    } catch (err) {
+      setShowToast({ msg: '删除失败', type: 'error' });
+    }
+    setShowDeleteConfirm(false);
+    setAccountToDelete(null);
+  };
+
+  // 取消删除
+  const cancelDeleteAccount = () => {
+    setShowDeleteConfirm(false);
+    setAccountToDelete(null);
+  };
+
+  // 选择账户
+  const handleSelectAccount = (accountId: string) => {
+    setSelectedAccount(accountId);
+    fetchMessages(accountId, true);
+  };
+
+  useEffect(() => {
+    fetchProviders();
+    fetchAccounts();
+  }, []);
+
+  useEffect(() => {
+    if (showToast) {
+      const timer = setTimeout(() => setShowToast(null), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [showToast]);
+
+  const selectedAccountData = accounts.find(a => a.id === selectedAccount);
+
+  return (
+    <>
+      <div className="page-header" style={{ margin: '-20px -24px 20px -24px', padding: '16px 24px' }}>
+        <div>
+          <div className="page-title">邮箱管理</div>
+          <div className="page-subtitle">绑定邮箱账号，收发未读邮件</div>
         </div>
+        <button
+          onClick={() => setShowAddModal(true)}
+          className="btn-primary"
+          style={{
+            padding: '8px 16px',
+            background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+            border: 'none',
+            borderRadius: '8px',
+            color: 'white',
+            fontSize: '14px',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px'
+          }}
+        >
+          <i className="fa-solid fa-plus"></i>
+          添加邮箱
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: '20px', height: 'calc(100vh - 180px)' }}>
+        {/* 左侧：邮箱账户列表 */}
+        <div style={{ width: '280px', flexShrink: 0 }}>
+          <div className="card" style={{ padding: '16px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>
+              已绑定邮箱 ({accounts.length})
+            </div>
+
+            {loading ? (
+              <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
+                加载中...
+              </div>
+            ) : accounts.length === 0 ? (
+              <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
+                  <i className="fa-solid fa-envelope"></i>
+                </div>
+                <div>暂无绑定邮箱</div>
+                <div style={{ fontSize: '12px', marginTop: '8px' }}>点击右上角添加邮箱</div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {accounts.map(account => (
+                  <div
+                    key={account.id}
+                    onClick={() => handleSelectAccount(account.id)}
+                    style={{
+                      padding: '14px',
+                      borderRadius: '10px',
+                      background: selectedAccount === account.id
+                        ? 'linear-gradient(135deg, rgba(157, 80, 187, 0.1) 0%, rgba(110, 72, 170, 0.1) 100%)'
+                        : 'rgba(255, 255, 255, 0.5)',
+                      border: selectedAccount === account.id ? '1px solid rgba(157, 80, 187, 0.3)' : '1px solid transparent',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{
+                          width: '36px',
+                          height: '36px',
+                          borderRadius: '8px',
+                          background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}>
+                          <i className="fa-solid fa-envelope" style={{ color: 'white', fontSize: '14px' }}></i>
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 500, fontSize: '13px' }}>{account.email}</div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{account.provider}</div>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        {account.unread_count > 0 && (
+                          <span style={{
+                            background: '#EF4444',
+                            color: 'white',
+                            padding: '2px 8px',
+                            borderRadius: '10px',
+                            fontSize: '11px',
+                            fontWeight: 600
+                          }}>
+                            {account.unread_count}
+                          </span>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleEditAccount(account);
+                          }}
+                          title="编辑"
+                          style={{
+                            width: '28px',
+                            height: '28px',
+                            borderRadius: '6px',
+                            border: 'none',
+                            background: 'rgba(0, 0, 0, 0.05)',
+                            color: '#6B7280',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                          }}
+                        >
+                          <i className="fa-solid fa-pen" style={{ fontSize: '12px' }}></i>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            confirmDeleteAccount(account.id);
+                          }}
+                          title="删除"
+                          style={{
+                            width: '28px',
+                            height: '28px',
+                            borderRadius: '6px',
+                            border: 'none',
+                            background: 'rgba(239, 68, 68, 0.1)',
+                            color: '#EF4444',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                          }}
+                        >
+                          <i className="fa-solid fa-trash" style={{ fontSize: '12px' }}></i>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 右侧：邮件列表 */}
+        {selectedAccount && selectedAccountData && (
+          <div style={{ width: '400px', flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <div className="card" style={{ padding: '16px' }}>
+              {/* 邮件列表头部 */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '10px',
+                    background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-envelope" style={{ color: 'white', fontSize: '16px' }}></i>
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: '14px' }}>{selectedAccountData.email}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                      {messages.filter(m => !m.is_read).length} 封未读邮件
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={() => markAllAsRead(selectedAccount)}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: '6px',
+                      border: '1px solid rgba(157, 80, 187, 0.3)',
+                      background: 'white',
+                      color: '#9D50BB',
+                      fontSize: '12px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <i className="fa-solid fa-check-double" style={{ marginRight: '4px' }}></i>
+                    一键已读
+                  </button>
+                  <button
+                    onClick={() => syncEmails(selectedAccount)}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                      color: 'white',
+                      fontSize: '12px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <i className="fa-solid fa-sync-alt" style={{ marginRight: '4px' }}></i>
+                    同步
+                  </button>
+                </div>
+              </div>
+
+              {/* 邮件列表 */}
+              {messagesLoading ? (
+                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
+                  加载中...
+                </div>
+              ) : messages.length === 0 ? (
+                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
+                    <i className="fa-regular fa-folder-open"></i>
+                  </div>
+                  <div>暂无未读邮件</div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {messages.map(msg => (
+                    <div
+                      key={msg.id}
+                      onClick={() => setSelectedMessage(msg)}
+                      style={{
+                        padding: '14px',
+                        borderRadius: '8px',
+                        background: selectedMessage?.id === msg.id
+                          ? 'rgba(157, 80, 187, 0.1)'
+                          : msg.is_read ? 'transparent' : 'rgba(157, 80, 187, 0.05)',
+                        border: selectedMessage?.id === msg.id
+                          ? '1px solid rgba(157, 80, 187, 0.4)'
+                          : '1px solid rgba(0, 0, 0, 0.05)',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            marginBottom: '4px'
+                          }}>
+                            <span style={{
+                              fontWeight: msg.is_read ? 400 : 600,
+                              fontSize: '13px',
+                              color: 'var(--text-primary)'
+                            }}>
+                              {msg.sender_email || msg.sender || '未知发件人'}
+                            </span>
+                            {!msg.is_read && (
+                              <span style={{
+                                width: '8px',
+                                height: '8px',
+                                borderRadius: '50%',
+                                background: '#9D50BB'
+                              }}></span>
+                            )}
+                          </div>
+                          <div style={{
+                            fontSize: '12px',
+                            color: 'var(--text-secondary)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            {msg.subject || '无主题'}
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                            {msg.date}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          {!msg.is_read && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                markAsRead(selectedAccount, msg.id);
+                              }}
+                              title="标记为已读"
+                              style={{
+                                width: '28px',
+                                height: '28px',
+                                borderRadius: '6px',
+                                border: 'none',
+                                background: 'rgba(16, 185, 129, 0.1)',
+                                color: '#10B981',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center'
+                              }}
+                            >
+                              <i className="fa-regular fa-check-circle" style={{ fontSize: '12px' }}></i>
+                            </button>
+                          )}
+                          {msg.sender_email && (
+                            <button
+                              onClick={() => {
+                                const url = `https://mail.${selectedAccountData.provider === 'gmail' ? 'google' : selectedAccountData.provider === 'qq' ? 'qq' : ''}.com/mail`;
+                                (window as any).electron?.shell?.openExternal?.(url);
+                              }}
+                              title="网页回复"
+                              style={{
+                                width: '28px',
+                                height: '28px',
+                                borderRadius: '6px',
+                                border: 'none',
+                                background: 'rgba(157, 80, 187, 0.1)',
+                                color: '#9D50BB',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center'
+                              }}
+                            >
+                              <i className="fa-regular fa-paper-plane" style={{ fontSize: '12px' }}></i>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 右侧：邮件详情 */}
+        {selectedMessage && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <div className="card" style={{ padding: '0', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {/* 邮件详情头部 */}
+              <div style={{
+                padding: '20px',
+                borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+                display: 'flex',
+                alignItems: 'flex-start',
+                justifyContent: 'space-between'
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: '16px',
+                    fontWeight: 600,
+                    marginBottom: '12px',
+                    wordBreak: 'break-word'
+                  }}>
+                    {selectedMessage.subject || '无主题'}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                    <div style={{
+                      width: '40px',
+                      height: '40px',
+                      borderRadius: '50%',
+                      background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'white',
+                      fontWeight: 600,
+                      fontSize: '14px'
+                    }}>
+                      {(selectedMessage.sender || selectedMessage.sender_email || '?')[0].toUpperCase()}
+                    </div>
+                    <div>
+                      <div style={{ fontWeight: 500, fontSize: '14px' }}>
+                        {selectedMessage.sender || '未知发件人'}
+                      </div>
+                      <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                        {selectedMessage.sender_email}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    收件人：{selectedMessage.recipients || selectedAccountData?.email}
+                  </div>
+                  {selectedMessage.from_raw && selectedMessage.from_raw !== selectedMessage.sender && (
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>原始发件人：</span>{selectedMessage.from_raw}
+                    </div>
+                  )}
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                    {selectedMessage.date}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedMessage(null)}
+                  style={{
+                    width: '32px',
+                    height: '32px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: 'rgba(0, 0, 0, 0.05)',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}
+                >
+                  <i className="fa-solid fa-times"></i>
+                </button>
+              </div>
+
+              {/* 邮件内容 */}
+              <div style={{
+                flex: 1,
+                overflow: 'auto',
+                padding: '20px',
+                fontSize: '14px',
+                lineHeight: '1.6'
+              }}>
+                {/* 纯文本内容 */}
+                {selectedMessage.body && !selectedMessage.body_html && (
+                  <pre style={{
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontFamily: 'inherit',
+                    margin: 0
+                  }}>
+                    {selectedMessage.body}
+                  </pre>
+                )}
+
+                {/* HTML内容 */}
+                {selectedMessage.body_html && (
+                  <iframe
+                    srcDoc={`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; margin: 0; padding: 0; }
+img { max-width: 100%; height: auto; }
+a { color: #9D50BB; }
+blockquote { border-left: 4px solid #ddd; margin: 0; padding-left: 16px; color: #666; }
+pre { background: #f5f5f5; padding: 12px; border-radius: 8px; overflow-x: auto; }
+</style>
+</head>
+<body>
+${selectedMessage.body_html}
+</body>
+</html>`}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      border: 'none',
+                      minHeight: '300px'
+                    }}
+                    sandbox="allow-same-origin"
+                  />
+                )}
+
+                {/* 纯文本但没有HTML时显示纯文本 */}
+                {!selectedMessage.body && !selectedMessage.body_html && (
+                  <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '40px' }}>
+                    邮件内容为空
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 添加邮箱弹窗 */}
+      {showAddModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.5)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999
+          }}
+          onClick={() => setShowAddModal(false)}
+        >
+          <div
+            className="card"
+            style={{
+              width: '420px',
+              maxWidth: '90vw',
+              background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.85))'
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div style={{
+              padding: '20px 24px',
+              borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+              color: 'white',
+              borderRadius: '12px 12px 0 0'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '10px',
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <i className="fa-solid fa-envelope" style={{ fontSize: '18px' }}></i>
+                </div>
+                <div>
+                  <div style={{ fontSize: '16px', fontWeight: 600 }}>添加邮箱</div>
+                  <div style={{ fontSize: '12px', opacity: 0.9 }}>绑定您的邮箱账户</div>
+                </div>
+              </div>
+              <div
+                onClick={() => setShowAddModal(false)}
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '8px',
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer'
+                }}
+              >
+                <i className="fa-solid fa-times"></i>
+              </div>
+            </div>
+
+            {/* Form */}
+            <div style={{ padding: '24px' }}>
+              {/* 邮箱提供商 */}
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  邮箱提供商
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {providers.map(p => (
+                    <div
+                      key={p.id}
+                      onClick={() => setNewProvider(p.id)}
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: '8px',
+                        border: newProvider === p.id ? '2px solid #9D50BB' : '1px solid rgba(0, 0, 0, 0.1)',
+                        background: newProvider === p.id ? 'rgba(157, 80, 187, 0.1)' : 'white',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px'
+                      }}
+                    >
+                      <span>{p.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* 邮箱地址 */}
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  邮箱地址
+                </label>
+                <input
+                  type="email"
+                  value={newEmail}
+                  onChange={e => setNewEmail(e.target.value)}
+                  placeholder="your@email.com"
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    border: '1px solid rgba(0, 0, 0, 0.1)',
+                    borderRadius: '10px',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              {/* 密码/授权码 */}
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  密码或授权码
+                </label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  placeholder="邮箱密码或授权码"
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    border: '1px solid rgba(0, 0, 0, 0.1)',
+                    borderRadius: '10px',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+                <div style={{
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  marginTop: '6px',
+                  lineHeight: '1.6',
+                  padding: '10px',
+                  background: 'rgba(255, 193, 7, 0.1)',
+                  borderRadius: '6px'
+                }}>
+                  <div style={{ fontWeight: 500, color: '#F59E0B', marginBottom: '4px' }}>
+                    <i className="fa-solid fa-exclamation-triangle" style={{ marginRight: '4px' }}></i>
+                    重要提示
+                  </div>
+                  <div style={{ marginBottom: '8px' }}>
+                    <strong>QQ邮箱</strong>：需要使用<strong style={{color: '#EF4444'}}>授权码</strong>，不是QQ密码！
+                  </div>
+                  <div style={{ marginBottom: '4px' }}>QQ邮箱授权码获取步骤：</div>
+                  <div style={{ marginLeft: '10px', marginBottom: '8px' }}>
+                    1. 登录 <a href="https://mail.qq.com" target="_blank" style={{color: '#9D50BB'}}>mail.qq.com</a><br/>
+                    2. 点击右上角 <strong>设置</strong><br/>
+                    3. 选择 <strong>账户</strong> 标签<br/>
+                    4. 找到 <strong>POP3/IMAP/SMTP/Exchange</strong> 服务<br/>
+                    5. 确保 <strong>IMAP/SMTP 服务</strong> 已开启<br/>
+                    6. 点击 <strong>生成授权码</strong><br/>
+                    7. 发送短信验证，获取16位授权码
+                  </div>
+                  <div>• Gmail：安全性 → 两步验证 → 应用专用密码</div>
+                  <div>• 163邮箱：设置 → 账户 → 开启IMAP → 授权码</div>
+                </div>
+              </div>
+
+              {/* 提交按钮 */}
+              <button
+                onClick={handleAddEmail}
+                disabled={adding}
+                style={{
+                  width: '100%',
+                  padding: '14px',
+                  border: 'none',
+                  borderRadius: '10px',
+                  background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: adding ? 'not-allowed' : 'pointer',
+                  opacity: adding ? 0.7 : 1
+                }}
+              >
+                {adding ? (
+                  <><i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>添加中...</>
+                ) : (
+                  '添加邮箱'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast - Portal */}
+      {showToast && ReactDOM.createPortal(
+        <div style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          padding: '14px 28px',
+          background: showToast.type === 'error' ? 'rgba(239, 68, 68, 0.95)' : 'rgba(16, 185, 129, 0.95)',
+          color: 'white',
+          borderRadius: '12px',
+          fontSize: '14px',
+          fontWeight: 500,
+          zIndex: 10000,
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.25)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
+        }}>
+          <i className={`fa-solid ${showToast.type === 'error' ? 'fa-exclamation-circle' : 'fa-check-circle'}`}></i>
+          {showToast.msg}
+        </div>,
+        document.body
+      )}
+
+      {/* 编辑邮箱弹窗 - Portal */}
+      {showEditModal && editingAccount && ReactDOM.createPortal(
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }} onClick={() => setShowEditModal(false)}>
+          <div style={{
+            background: 'white',
+            borderRadius: '16px',
+            padding: '24px',
+            width: '400px',
+            maxWidth: '90%',
+            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)'
+          }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 20px 0', fontSize: '18px', color: '#1F2937' }}>编辑邮箱</h3>
+
+            {/* 邮箱服务商 */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#4B5563' }}>邮箱服务商</label>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, 1fr)',
+                gap: '8px'
+              }}>
+                {['gmail', 'outlook', 'qq', '163', 'yahoo', 'icloud'].map(provider => (
+                  <button
+                    key={provider}
+                    type="button"
+                    onClick={() => setEditProvider(provider)}
+                    style={{
+                      padding: '10px',
+                      border: editProvider === provider ? '2px solid #9D50BB' : '2px solid #E5E7EB',
+                      borderRadius: '8px',
+                      background: 'white',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      fontWeight: editProvider === provider ? 600 : 400,
+                      color: editProvider === provider ? '#9D50BB' : '#374151',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {providers.find(p => p.id === provider)?.name || provider}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 邮箱地址 */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#4B5563' }}>邮箱地址</label>
+              <input
+                type="email"
+                value={editEmail}
+                onChange={e => setEditEmail(e.target.value)}
+                placeholder="请输入邮箱地址"
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '2px solid #E5E7EB',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  transition: 'border-color 0.2s'
+                }}
+              />
+            </div>
+
+            {/* 授权码/密码 */}
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#4B5563' }}>授权码/密码</label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  type={showEditPassword ? 'text' : 'password'}
+                  value={editPassword}
+                  onChange={e => setEditPassword(e.target.value)}
+                  placeholder="请输入授权码或密码"
+                  style={{
+                    width: '100%',
+                    padding: '12px 40px 12px 12px',
+                    border: '2px solid #E5E7EB',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    transition: 'border-color 0.2s'
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowEditPassword(!showEditPassword)}
+                  style={{
+                    position: 'absolute',
+                    right: '10px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: '#9CA3AF',
+                    padding: '4px'
+                  }}
+                >
+                  <i className={`fa-solid ${showEditPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
+                </button>
+              </div>
+            </div>
+
+            {/* 操作按钮 */}
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => setShowEditModal(false)}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  border: '2px solid #E5E7EB',
+                  borderRadius: '10px',
+                  background: 'white',
+                  color: '#6B7280',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleSaveEdit}
+                disabled={editing}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  border: 'none',
+                  borderRadius: '10px',
+                  background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: 600,
+                  cursor: editing ? 'not-allowed' : 'pointer',
+                  opacity: editing ? 0.7 : 1
+                }}
+              >
+                {editing ? (
+                  <><i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>保存中...</>
+                ) : (
+                  '保存'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* 删除确认弹窗 - Portal */}
+      {showDeleteConfirm && accountToDelete && ReactDOM.createPortal(
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }} onClick={cancelDeleteAccount}>
+          <div style={{
+            width: '360px',
+            maxWidth: '90vw',
+            background: 'white',
+            borderRadius: '16px',
+            overflow: 'hidden',
+            boxShadow: '0 16px 48px rgba(0, 0, 0, 0.2)'
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '24px', textAlign: 'center' }}>
+              {/* Warning Icon */}
+              <div style={{
+                width: '64px',
+                height: '64px',
+                borderRadius: '50%',
+                background: 'rgba(239, 68, 68, 0.1)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 16px'
+              }}>
+                <i className="fa-solid fa-triangle-exclamation" style={{ fontSize: '28px', color: '#EF4444' }}></i>
+              </div>
+              <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px', color: '#1F2937' }}>
+                确认删除
+              </div>
+              <div style={{ fontSize: '14px', color: '#6B7280', marginBottom: '24px' }}>
+                确定要删除这个邮箱账户吗？
+                <br />
+                <span style={{ fontSize: '12px', color: '#9CA3AF' }}>此操作无法撤销，所有邮件记录将被删除</span>
+              </div>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <div
+                  onClick={cancelDeleteAccount}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    borderRadius: '12px',
+                    background: 'rgba(0, 0, 0, 0.05)',
+                    color: '#6B7280',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  取消
+                </div>
+                <div
+                  onClick={handleDeleteAccount}
+                  style={{
+                    flex: 1,
+                    padding: '12px',
+                    borderRadius: '12px',
+                    background: '#EF4444',
+                    color: 'white',
+                    fontSize: '14px',
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  删除
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </>
   );
@@ -2233,19 +4051,26 @@ function FilesView() {
     }
   }, []);
 
-  // 保存连接配置（基于 username@host:port+root 去重，允许相同配置不同连接名）
+  // 保存连接配置
   const saveConnection = (conn: SavedConnection) => {
-    const existingIndex = savedConnections.findIndex(
-      c => c.username === conn.username && c.host === conn.host && c.port === conn.port && c.root === conn.root
-    );
     let updated;
-    if (existingIndex >= 0) {
-      // 更新现有连接（保留原ID）
-      updated = [...savedConnections];
-      updated[existingIndex] = { ...conn, id: savedConnections[existingIndex].id };
+    if (editingConnId) {
+      // 编辑模式：更新指定ID的连接
+      updated = savedConnections.map(c => c.id === editingConnId ? { ...conn, id: editingConnId } : c);
+      setEditingConnId(null); // 重置编辑状态
     } else {
-      // 添加新连接
-      updated = [...savedConnections, conn];
+      // 新建模式：基于 username@host:port+root 去重
+      const existingIndex = savedConnections.findIndex(
+        c => c.username === conn.username && c.host === conn.host && c.port === conn.port && c.root === conn.root
+      );
+      if (existingIndex >= 0) {
+        // 更新现有连接（保留原ID）
+        updated = [...savedConnections];
+        updated[existingIndex] = { ...conn, id: savedConnections[existingIndex].id };
+      } else {
+        // 添加新连接
+        updated = [...savedConnections, conn];
+      }
     }
     setSavedConnections(updated);
     localStorage.setItem('ssh_connections', JSON.stringify(updated));
@@ -2600,9 +4425,10 @@ function FilesView() {
     }
   };
 
-  // 快速连接（从列表点击）
+  // 快速连接（从列表点击）- 进入编辑模式
   const handleQuickConnect = async (savedConn: SavedConnection) => {
-    // 恢复保存的连接信息
+    // 恢复保存的连接信息，进入编辑模式
+    setEditingConnId(savedConn.id);
     setConnName(savedConn.name);
     setSshHost(savedConn.host);
     setSshPort(savedConn.port);
@@ -2807,40 +4633,139 @@ function FilesView() {
             </button>
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '20px', padding: '4px 0' }}>
             {savedConnections.map((conn) => (
               <div
                 key={conn.id}
-                className="card"
-                style={{ padding: '16px', cursor: 'pointer' }}
+                style={{
+                  background: 'linear-gradient(145deg, #ffffff 0%, rgba(255, 255, 255, 0.9) 100%)',
+                  borderRadius: '16px',
+                  padding: '0',
+                  cursor: 'pointer',
+                  border: '1px solid rgba(255, 255, 255, 0.8)',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04)',
+                  transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                  overflow: 'hidden'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-4px)';
+                  e.currentTarget.style.boxShadow = '0 12px 40px rgba(0, 0, 0, 0.1), 0 4px 12px rgba(0, 0, 0, 0.06)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 4px 20px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04)';
+                }}
                 onClick={() => handleQuickConnect(conn)}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                  <div style={{
-                    width: '40px', height: '40px', borderRadius: '10px',
-                    background: 'linear-gradient(135deg, #FF8E53, #FF6A00)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}>
-                    <i className="fa-solid fa-server" style={{ color: 'white' }}></i>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: '14px', fontWeight: 600 }}>{conn.name}</div>
-                    <div style={{ fontSize: '12px', color: '#6B7280' }}>{conn.username}@{conn.host}:{conn.port}</div>
+                {/* 顶部区域：图标和信息 */}
+                <div style={{ padding: '20px 20px 16px 20px' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '14px' }}>
+                    {/* 服务器图标 */}
+                    <div style={{
+                      width: '48px', height: '48px', borderRadius: '14px',
+                      background: 'linear-gradient(145deg, #FF8E53 0%, #FF6A00 100%)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      boxShadow: '0 6px 20px rgba(255, 106, 0, 0.35)',
+                      flexShrink: 0
+                    }}>
+                      <i className="fa-solid fa-server" style={{ color: 'white', fontSize: '20px' }}></i>
+                    </div>
+
+                    {/* 标题和副标题 */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: '16px', fontWeight: 600, color: '#1F2937',
+                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        marginBottom: '4px'
+                      }}>{conn.name}</div>
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: '6px',
+                        fontSize: '13px', color: '#6B7280'
+                      }}>
+                        <i className="fa-solid fa-user" style={{ fontSize: '11px', opacity: 0.7 }}></i>
+                        <span style={{
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+                        }}>{conn.username}</span>
+                        <span style={{ opacity: 0.5 }}>@</span>
+                        <span style={{
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                          color: '#4B5563', fontWeight: 500
+                        }}>{conn.host}</span>
+                        <span style={{
+                          background: 'rgba(0, 0, 0, 0.06)', padding: '2px 6px',
+                          borderRadius: '4px', fontSize: '11px', fontWeight: 500,
+                          flexShrink: 0
+                        }}>{conn.port}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
+
+                {/* 根目录信息 */}
+                <div style={{
+                  margin: '0 20px 16px 24px',
+                  padding: '12px 14px',
+                  background: 'linear-gradient(135deg, rgba(255, 142, 83, 0.08) 0%, rgba(255, 106, 0, 0.04) 100%)',
+                  borderRadius: '12px',
+                  display: 'flex', alignItems: 'center', gap: '10px',
+                  border: '1px solid rgba(255, 142, 83, 0.12)'
+                }}>
+                  <div style={{
+                    width: '28px', height: '28px', borderRadius: '8px',
+                    background: 'linear-gradient(145deg, rgba(255, 142, 83, 0.2), rgba(255, 106, 0, 0.15))',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  }}>
+                    <i className="fa-solid fa-folder" style={{ color: '#FF6A00', fontSize: '12px' }}></i>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '10px', color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>
+                      Root Directory
+                    </div>
+                    <div style={{
+                      fontSize: '13px', color: '#374151',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      fontFamily: 'monospace'
+                    }}>{conn.root || '/'}</div>
+                  </div>
+                  <i className="fa-solid fa-chevron-right" style={{ color: '#9CA3AF', fontSize: '11px', opacity: 0.5 }}></i>
+                </div>
+
+                {/* 底部操作栏 */}
+                <div style={{
+                  padding: '14px 20px 16px 20px',
+                  borderTop: '1px solid rgba(0, 0, 0, 0.04)',
+                  display: 'flex', alignItems: 'center', gap: '10px',
+                  background: 'rgba(0, 0, 0, 0.01)'
+                }}>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       handleQuickConnect(conn);
                     }}
                     style={{
-                      flex: 1, padding: '8px', borderRadius: '8px', border: 'none',
-                      background: 'rgba(255, 142, 83, 0.1)', color: '#FF6A00',
-                      fontSize: '12px', cursor: 'pointer'
+                      flex: 1,
+                      padding: '12px 16px',
+                      borderRadius: '10px',
+                      border: 'none',
+                      background: 'linear-gradient(135deg, #FF8E53 0%, #FF6A00 100%)',
+                      color: 'white',
+                      fontSize: '14px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      boxShadow: '0 4px 14px rgba(255, 106, 0, 0.35)'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.boxShadow = '0 6px 20px rgba(255, 106, 0, 0.45)';
+                      e.currentTarget.style.transform = 'translateY(-1px)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.boxShadow = '0 4px 14px rgba(255, 106, 0, 0.35)';
+                      e.currentTarget.style.transform = 'translateY(0)';
                     }}
                   >
-                    连接
+                    <i className="fa-solid fa-plug" style={{ marginRight: '8px' }}></i>
+                    Connect
                   </button>
                   <button
                     onClick={(e) => {
@@ -2848,25 +4773,45 @@ function FilesView() {
                       confirmDelete(conn);
                     }}
                     style={{
-                      padding: '8px', borderRadius: '8px', border: 'none',
-                      background: 'rgba(239, 68, 68, 0.1)', color: '#EF4444',
-                      fontSize: '12px', cursor: 'pointer'
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '10px',
+                      border: 'none',
+                      background: 'rgba(239, 68, 68, 0.08)',
+                      color: '#EF4444',
+                      fontSize: '14px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(239, 68, 68, 0.08)';
                     }}
                   >
-                    <i className="fa-solid fa-trash"></i>
+                    <i className="fa-solid fa-trash-can"></i>
                   </button>
                 </div>
               </div>
             ))}
             {/* 添加更多卡片 */}
             <div
-              className="card"
               style={{
-                padding: '16px', cursor: 'pointer', border: '2px dashed rgba(0,0,0,0.1)',
+                background: 'linear-gradient(145deg, rgba(255, 255, 255, 0.7) 0%, rgba(249, 250, 251, 0.5) 100%)',
+                borderRadius: '16px',
+                padding: '0',
+                cursor: 'pointer',
+                border: '2px dashed rgba(255, 142, 83, 0.25)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                minHeight: '120px'
+                minHeight: '200px',
+                transition: 'all 0.3s ease',
+                position: 'relative',
+                overflow: 'hidden'
               }}
               onClick={() => {
+                setEditingConnId(null); // 重置编辑状态
                 setConnName('');
                 setSshHost('');
                 setSshPort(22);
@@ -2877,10 +4822,26 @@ function FilesView() {
                 setError('');
                 setView('create');
               }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = 'rgba(255, 142, 83, 0.5)';
+                e.currentTarget.style.background = 'linear-gradient(145deg, rgba(255, 255, 255, 0.85) 0%, rgba(249, 250, 251, 0.65) 100%)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = 'rgba(255, 142, 83, 0.25)';
+                e.currentTarget.style.background = 'linear-gradient(145deg, rgba(255, 255, 255, 0.7) 0%, rgba(249, 250, 251, 0.5) 100%)';
+              }}
             >
               <div style={{ textAlign: 'center', color: '#6B7280' }}>
-                <i className="fa-solid fa-plus" style={{ fontSize: '24px', marginBottom: '8px' }}></i>
-                <div style={{ fontSize: '13px' }}>添加更多</div>
+                <div style={{
+                  width: '56px', height: '56px', borderRadius: '16px',
+                  background: 'linear-gradient(135deg, rgba(255, 142, 83, 0.15), rgba(255, 106, 0, 0.1))',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  margin: '0 auto 14px'
+                }}>
+                  <i className="fa-solid fa-plus" style={{ fontSize: '24px', color: '#FF6A00' }}></i>
+                </div>
+                <div style={{ fontSize: '14px', fontWeight: 500, color: '#374151' }}>添加服务器</div>
+                <div style={{ fontSize: '12px', color: '#9CA3AF', marginTop: '4px' }}>创建新的 SFTP 连接</div>
               </div>
             </div>
           </div>
@@ -2891,44 +4852,57 @@ function FilesView() {
           <div style={{
             position: 'fixed', inset: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            zIndex: 1000, background: 'rgba(0,0,0,0.3)',
+            zIndex: 9999, background: 'rgba(0, 0, 0, 0.5)',
             backdropFilter: 'blur(4px)'
           }}>
-            <div className="card" style={{ padding: '24px', maxWidth: '360px', width: '90%' }}>
-              <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+            <div style={{
+              width: '360px', maxWidth: '90vw',
+              background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.85))',
+              borderRadius: '16px', overflow: 'hidden',
+              boxShadow: '0 16px 48px rgba(0, 0, 0, 0.15)'
+            }}>
+              <div style={{ padding: '24px', textAlign: 'center' }}>
+                {/* Warning Icon */}
                 <div style={{
-                  width: '56px', height: '56px', borderRadius: '50%',
-                  background: 'rgba(239, 68, 68, 0.1)', margin: '0 auto 16px',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  width: '64px', height: '64px', borderRadius: '50%',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  margin: '0 auto 16px'
                 }}>
-                  <i className="fa-solid fa-exclamation-triangle" style={{ fontSize: '24px', color: '#EF4444' }}></i>
+                  <i className="fa-solid fa-triangle-exclamation" style={{ fontSize: '28px', color: '#EF4444' }}></i>
                 </div>
-                <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px' }}>确认删除</h3>
-                <p style={{ fontSize: '13px', color: '#6B7280' }}>
-                  确定要删除服务器 <strong>{connToDelete.name}</strong> 吗？此操作不可恢复。
-                </p>
-              </div>
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <button
-                  onClick={cancelDelete}
-                  style={{
-                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
-                    background: 'rgba(0,0,0,0.05)', color: '#6B7280',
-                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
-                  }}
-                >
-                  取消
-                </button>
-                <button
-                  onClick={() => deleteConnection(connToDelete.id)}
-                  style={{
-                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
-                    background: 'linear-gradient(135deg, #EF4444, #DC2626)', color: 'white',
-                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
-                  }}
-                >
-                  删除
-                </button>
+                <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>
+                  确认删除
+                </div>
+                <div style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
+                  确定要删除服务器 <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{connToDelete.name}</span> 吗？
+                  <br />
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>此操作无法撤销</span>
+                </div>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <div
+                    onClick={cancelDelete}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: '12px',
+                      background: 'rgba(0, 0, 0, 0.05)', color: 'var(--text-secondary)',
+                      fontSize: '14px', fontWeight: 500, cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    取消
+                  </div>
+                  <div
+                    onClick={() => deleteConnection(connToDelete.id)}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: '12px',
+                      background: '#EF4444', color: 'white',
+                      fontSize: '14px', fontWeight: 500, cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    删除
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -5099,44 +7073,57 @@ function SettingsView() {
           <div style={{
             position: 'fixed', inset: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            zIndex: 1000, background: 'rgba(0,0,0,0.3)',
+            zIndex: 9999, background: 'rgba(0, 0, 0, 0.5)',
             backdropFilter: 'blur(4px)'
           }}>
-            <div className="card" style={{ padding: '24px', maxWidth: '360px', width: '90%' }}>
-              <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+            <div style={{
+              width: '360px', maxWidth: '90vw',
+              background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.85))',
+              borderRadius: '16px', overflow: 'hidden',
+              boxShadow: '0 16px 48px rgba(0, 0, 0, 0.15)'
+            }}>
+              <div style={{ padding: '24px', textAlign: 'center' }}>
+                {/* Warning Icon */}
                 <div style={{
-                  width: '56px', height: '56px', borderRadius: '50%',
-                  background: 'rgba(239, 68, 68, 0.1)', margin: '0 auto 16px',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  width: '64px', height: '64px', borderRadius: '50%',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  margin: '0 auto 16px'
                 }}>
-                  <i className="fa-solid fa-exclamation-triangle" style={{ fontSize: '24px', color: '#EF4444' }}></i>
+                  <i className="fa-solid fa-triangle-exclamation" style={{ fontSize: '28px', color: '#EF4444' }}></i>
                 </div>
-                <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px' }}>确认删除</h3>
-                <p style={{ fontSize: '13px', color: '#6B7280' }}>
-                  确定要删除模型配置 <strong>{config.name}</strong> 吗？此操作不可恢复。
-                </p>
-              </div>
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <button
-                  onClick={cancelDeleteConfig}
-                  style={{
-                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
-                    background: 'rgba(0,0,0,0.05)', color: '#6B7280',
-                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
-                  }}
-                >
-                  取消
-                </button>
-                <button
-                  onClick={deleteConfig}
-                  style={{
-                    flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
-                    background: 'linear-gradient(135deg, #EF4444, #DC2626)', color: 'white',
-                    fontSize: '13px', cursor: 'pointer', fontWeight: 500
-                  }}
-                >
-                  删除
-                </button>
+                <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '8px', color: 'var(--text-primary)' }}>
+                  确认删除
+                </div>
+                <div style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
+                  确定要删除模型配置 <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{config.name}</span> 吗？
+                  <br />
+                  <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>此操作无法撤销</span>
+                </div>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <div
+                    onClick={cancelDeleteConfig}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: '12px',
+                      background: 'rgba(0, 0, 0, 0.05)', color: 'var(--text-secondary)',
+                      fontSize: '14px', fontWeight: 500, cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    取消
+                  </div>
+                  <div
+                    onClick={deleteConfig}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: '12px',
+                      background: '#EF4444', color: 'white',
+                      fontSize: '14px', fontWeight: 500, cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    删除
+                  </div>
+                </div>
               </div>
             </div>
           </div>

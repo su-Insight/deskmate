@@ -106,6 +106,7 @@ class DatabaseManager:
                 is_read INTEGER DEFAULT 0,
                 folder TEXT DEFAULT 'INBOX',
                 fetched_at INTEGER,
+                attachments TEXT,
                 FOREIGN KEY(account_id) REFERENCES email_accounts(id) ON DELETE CASCADE,
                 UNIQUE(account_id, uid)
             )""")
@@ -113,6 +114,18 @@ class DatabaseManager:
             # 添加 from_raw 列（如果不存在）
             try:
                 conn.execute("ALTER TABLE email_messages ADD COLUMN from_raw TEXT")
+            except:
+                pass
+
+            # 添加 attachments 列（如果不存在）
+            try:
+                conn.execute("ALTER TABLE email_messages ADD COLUMN attachments TEXT")
+            except:
+                pass
+
+            # 添加 recipients 列（如果不存在）
+            try:
+                conn.execute("ALTER TABLE email_messages ADD COLUMN recipients TEXT")
             except:
                 pass
             defaults = [
@@ -1075,42 +1088,60 @@ def update_email_account(account_id):
 
 @app.route('/api/email/accounts/<account_id>/sync', methods=['POST'])
 def sync_email_messages(account_id):
-    """同步邮件 - 获取未读邮件 (修正版：增强解析与附件处理)"""
+    """同步邮件 - 获取未读邮件（含附件与原始发件人解析）"""
     import imaplib
     import ssl
     import email
-    import re
     import json
+    import re
     import uuid
     from email.header import decode_header
     from datetime import datetime
 
-    # --- 内部辅助函数：通用解码 ---
-    def decode_str(header_value):
-        """解析邮件头部的编码 (如 =?utf-8?b?...)"""
+    # --- 辅助函数：解码头部 ---
+    def decode_text(header_value):
         if not header_value:
             return ''
         try:
-            # decode_header 返回一个列表 [(decoded_string, charset), ...]
-            decoded_list = decode_header(header_value)
-            parts = []
-            for content, encoding in decoded_list:
-                if isinstance(content, bytes):
-                    if encoding:
-                        try:
-                            parts.append(content.decode(encoding))
-                        except:
-                            # 常见备用编码尝试
-                            try: parts.append(content.decode('utf-8'))
-                            except: parts.append(content.decode('gbk', errors='ignore'))
-                    else:
-                        # 无编码标识，默认尝试 utf-8
-                        parts.append(content.decode('utf-8', errors='ignore'))
+            decoded_parts = decode_header(header_value)
+            text_parts = []
+            for part, encoding in decoded_parts:
+                if isinstance(part, bytes):
+                    try:
+                        if encoding:
+                            text = part.decode(encoding)
+                        else:
+                            text = part.decode('utf-8', errors='ignore')
+                    except:
+                        text = part.decode('gbk', errors='ignore')
                 else:
-                    parts.append(str(content))
-            return ''.join(parts).strip()
+                    text = str(part)
+                text_parts.append(text)
+            return ''.join(text_parts).strip()
         except Exception:
             return str(header_value)
+
+    # --- 辅助函数：尝试解析转发邮件中的原始发件人 ---
+    def extract_original_sender(text_body, default_sender):
+        if not text_body:
+            return default_sender
+        
+        # 常见转发分隔符模式
+        patterns = [
+            r"From:\s*([^\n\r]+)",              # 通用 From: xxx
+            r"发件人[:：]\s*([^\n\r]+)",         # 中文 发件人: xxx
+            r"-----Original Message-----.*?From:\s*([^\n\r]+)" # Outlook风格
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text_body, re.IGNORECASE | re.DOTALL)
+            if match:
+                raw_extracted = match.group(1).strip()
+                # 清理提取出的内容（去掉可能的HTML标签或多余字符）
+                clean_match = re.sub(r'<.*?>', '', raw_extracted)
+                return f"{clean_match} (via {default_sender})"
+        
+        return default_sender
 
     try:
         # 1. 获取账户信息
@@ -1139,13 +1170,13 @@ def sync_email_messages(account_id):
             
             imap_conn.login(login_username, account['password'])
             
-            # 163 必须的 ID 命令
-            if '163.com' in account['imap_host'] or account['provider'] == '163':
+            # 163 ID 命令
+            if account['provider'] == '163':
                 try:
                     imaplib.Commands['ID'] = ('AUTH', 'SELECTED')
                     args = ("name", "client", "version", "1.0.0")
                     imap_conn._simple_command('ID', '("' + '" "'.join(args) + '")')
-                except Exception: pass
+                except: pass
 
             imap_conn.select('INBOX', readonly=True)
 
@@ -1153,25 +1184,26 @@ def sync_email_messages(account_id):
             return jsonify({'success': False, 'error': f'连接/登录失败: {str(e)}'}), 500
 
         # 3. 搜索邮件
-        # 建议：为了性能，先搜索 UNSEEN，如果需要更多再逻辑扩展。这里为了演示获取内容，使用 ALL 并取最后 20 封
         email_ids = []
         try:
-            # status, messages = imap_conn.search(None, 'UNSEEN') # 只抓未读
-            status, messages = imap_conn.search(None, 'ALL')    # 抓取所有(用于测试)
+            # 优先搜索未读，如果没有则不搜索ALL（避免量太大），或者按需策略
+            status, messages = imap_conn.search(None, 'UNSEEN')
             if status == 'OK':
-                all_ids = messages[0].split()
-                email_ids = all_ids[-20:] if all_ids else [] # 只取最新的 20 封，防止超时
-        except Exception as e:
-            print(f"[邮件同步] 搜索失败: {e}")
+                email_ids = messages[0].split()
+        except Exception:
+            pass
 
+        fetched_emails = [] # 用于返回给前端的列表
         fetched_count = 0
         now = int(datetime.now().timestamp())
 
-        if email_ids:
-            print(f"[邮件同步] 准备处理 {len(email_ids)} 封邮件...")
+        # 限制单次同步数量，防止超时
+        process_ids = email_ids[-20:] if email_ids else [] 
+        
+        if process_ids:
+            print(f"[邮件同步] 发现 {len(process_ids)} 封未读邮件")
 
-        # 倒序遍历，优先处理最新邮件
-        for email_id in reversed(email_ids):
+        for email_id in process_ids:
             try:
                 status, msg_data = imap_conn.fetch(email_id, '(RFC822)')
                 if status != 'OK': continue
@@ -1179,130 +1211,135 @@ def sync_email_messages(account_id):
                 raw_email = msg_data[0][1]
                 msg = email.message_from_bytes(raw_email)
 
-                # === A. 解析头部信息 ===
-                subject = decode_str(msg.get('Subject', '无主题'))
-                from_raw = msg.get('From', '')
-
-                from_decoded = decode_str(from_raw)
+                # --- 基础信息解析 ---
+                subject = decode_text(msg.get('subject', '无主题'))
+                from_raw = msg.get('from', '')
+                from_decoded = decode_text(from_raw)
                 
-                # 提取纯邮箱地址 <xxx@xxx.com> -> xxx@xxx.com
+                # 提取标准邮箱地址
                 sender_email = ''
-                match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9._%+-]+)', from_raw)
-                if match: 
-                    sender_email = match.group(1)
-                
+                email_match = re.search(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9._%+-]+)', from_raw)
+                if email_match:
+                    sender_email = email_match.group(1)
+
                 date = msg.get('date', '')
 
-                # === B. 解析内容 (正文 + 附件) ===
+                # --- 内容与附件解析 ---
                 body = ''
                 body_html = ''
                 attachments = []
 
-                # 使用 walk 遍历所有部分
-                for part in msg.walk():
-                    if part.is_multipart():
-                        continue
+                def parse_part(part):
+                    """递归解析邮件部分"""
+                    try:
+                        content_type = part.get_content_type()
+                        content_disposition = str(part.get('Content-Disposition', ''))
 
-                    content_type = part.get_content_type()
-                    content_disposition = str(part.get('Content-Disposition', ''))
-                    filename = part.get_filename()
+                        # 获取文件名
+                        filename = part.get_filename()
 
-                    # --- 1. 处理附件 ---
-                    if filename or 'attachment' in content_disposition:
-                        if filename:
-                            # 解码文件名
-                            fname = decode_str(filename)
-                            # 获取附件大小 (不建议直接存附件内容到DB，只存元数据)
+                        # === 附件处理逻辑 ===
+                        if filename or 'attachment' in content_disposition:
+                            if filename:
+                                filename = decode_text(filename)
+                            else:
+                                filename = "unknown_file"
+
+                            # 获取附件大小
                             payload = part.get_payload(decode=True)
-                            fsize = len(payload) if payload else 0
-                            
+                            size = len(payload) if payload else 0
+
                             attachments.append({
-                                'filename': fname,
-                                'size': fsize,
+                                'filename': filename,
+                                'size': size,
                                 'content_type': content_type
                             })
-                            print(f"    [附件] 发现: {fname}")
-                        continue # 是附件，跳过正文处理
+                            return
 
-                    # --- 2. 处理正文 ---
-                    try:
-                        payload = part.get_payload(decode=True)
-                        if not payload: continue
-
-                        # 获取字符集，默认 utf-8
-                        charset = part.get_content_charset()
-                        
-                        # 尝试解码
-                        content = ""
+                        # === 正文处理逻辑 ===
                         try:
-                            if charset:
-                                content = payload.decode(charset, errors='replace')
-                            else:
-                                content = payload.decode('utf-8', errors='replace')
+                            payload = part.get_payload(decode=True)
+                            charset = part.get_content_charset() or 'utf-8'
+                            content = payload.decode(charset, errors='ignore')
                         except:
-                            # 最后尝试 GBK
-                            content = payload.decode('gbk', errors='replace')
+                            content = str(part.get_payload())
 
-                        # 分类存储
                         if content_type == 'text/html':
                             body_html += content
                         elif content_type == 'text/plain':
                             body += content
-                            
-                    except Exception as parse_err:
-                        print(f"    [解析错误] 正文解码失败: {parse_err}")
+                    except Exception as e:
+                        print(f"[邮件解析] 解析部分失败: {e}")
 
-                # === C. 存入数据库 ===
-                uid_str = str(email_id.decode())
+                # 递归遍历邮件部分（支持 multipart）
+                def walk_parts(msg_part):
+                    """递归遍历 multipart 的所有子部分"""
+                    if msg_part.is_multipart():
+                        for sub_part in msg_part.get_payload():
+                            walk_parts(sub_part)
+                    else:
+                        parse_part(msg_part)
+
+                walk_parts(msg)
+
+                # --- 原始发件人逻辑 ---
+                # 1. 优先看 Reply-To
+                reply_to = decode_text(msg.get('Reply-To', ''))
+                # 2. 如果是转发(Fwd)，尝试从正文提取
+                original_sender_info = from_decoded
+                if reply_to and reply_to != from_decoded:
+                     original_sender_info = f"{reply_to} (via {from_decoded})"
+                elif "fwd:" in subject.lower() or "转发" in subject:
+                    # 尝试从纯文本正文中提取
+                    original_sender_info = extract_original_sender(body, from_decoded)
+
                 msg_uuid = str(uuid.uuid4())
+                
+                # 构造数据对象
+                email_data = {
+                    'id': msg_uuid,
+                    'account_id': account_id,
+                    'uid': str(email_id.decode()), # IMAP UID
+                    'subject': subject,
+                    'sender': original_sender_info, # 使用处理过的原始发件人信息
+                    'sender_email': sender_email,
+                    'body': body[:10000], # 截断防止过大
+                    'body_html': body_html[:50000],
+                    'attachments': json.dumps(attachments), # 序列化附件列表
+                    'date': date,
+                    'is_read': 0,
+                    'fetched_at': now
+                }
 
-                # 打印结果概览
-                print(f"[处理中] {subject[:20]} | TXT: {len(body)} | HTML: {len(body_html)} | 附件: {len(attachments)}")
-
+                # --- 存入数据库 ---
                 with db.get_connection() as db_conn:
-                    # 关键修改：先删除旧记录 (防止 INSERT OR IGNORE 导致内容无法更新)
-                    # 假设我们通过 account_id 和 uid (邮件服务器ID) 唯一确定一封邮件
-                    db_conn.execute(
-                        "DELETE FROM email_messages WHERE account_id = ? AND uid = ?", 
-                        (account_id, uid_str)
-                    )
-
-                    # 插入新记录
-                    # 注意：需要确保数据库表有 attachments 字段。如果没有，请先执行 ALTER TABLE
+                    # 假设你已经修改了数据库表，增加了 attachments 字段
+                    # 如果没有修改表，请先执行 SQL ALTER TABLE
                     db_conn.execute("""
-                        INSERT INTO email_messages
-                        (id, account_id, uid, subject, sender, sender_email, from_raw, 
-                         recipients, date, body, body_html, attachments, is_read, folder, fetched_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'INBOX', ?)
-                    """, (
-                        msg_uuid, account_id, uid_str,
-                        subject, from_decoded, sender_email, from_raw,
-                        msg.get('to', ''), date,
-                        body[:20000],          # 限制长度防止数据库报错
-                        body_html[:50000],     # 限制长度
-                        json.dumps(attachments), # 将附件列表转为 JSON 字符串存储
-                        now
-                    ))
+                        INSERT OR IGNORE INTO email_messages
+                        (id, account_id, uid, subject, sender, sender_email, 
+                         date, body, body_html, is_read, folder, fetched_at, attachments)
+                        VALUES (:id, :account_id, :uid, :subject, :sender, :sender_email, 
+                                :date, :body, :body_html, :is_read, 'INBOX', :fetched_at, :attachments)
+                    """, email_data)
                     fetched_count += 1
+                    
+                    # 转换 attachments 为对象返回给前端，而不是 JSON 字符串
+                    email_data['attachments'] = attachments
+                    fetched_emails.append(email_data)
+
+                print(f"[邮件同步] 已处理: {subject[:20]} | 附件: {len(attachments)}")
 
             except Exception as e:
-                print(f"[邮件同步] 单封处理异常: {e}")
+                print(f"[邮件同步] 处理单封邮件失败 {email_id}: {e}")
                 continue
 
         imap_conn.logout()
-        print(f"[邮件同步] 完成，处理了 {fetched_count} 封邮件")
-
-        # 返回未读数
-        with db.get_connection() as conn:
-            unread = conn.execute(
-                "SELECT COUNT(*) as count FROM email_messages WHERE account_id = ? AND is_read = 0",
-                (account_id,)
-            ).fetchone()
 
         return jsonify({
             'success': True,
-            'fetched': fetched_count,
-            'unread_count': unread['count'] if unread else 0
+            'fetched_count': fetched_count,
+            'messages': fetched_emails # 直接返回抓取到的邮件内容
         })
 
     except Exception as e:
@@ -1335,7 +1372,6 @@ def get_email_messages(account_id):
 
         with db.get_connection() as conn:
             messages = conn.execute(query, params).fetchall()
-            print(messages)
 
         result = []
         for msg in messages:
@@ -1346,7 +1382,7 @@ def get_email_messages(account_id):
                 'sender_email': msg['sender_email'],
                 'date': msg['date'],
                 'is_read': msg['is_read'],
-                'has_body': bool(msg['body'] or msg['body_html']),
+                'has_body': bool(msg['body'] or msg['body_html'])
             })
 
         return jsonify({
@@ -1371,6 +1407,20 @@ def get_email_message_detail(account_id, msg_id):
         if not msg:
             return jsonify({'success': False, 'error': '邮件不存在'}), 404
 
+        # 标记为已读
+        with db.get_connection() as conn:
+            conn.execute(
+                "UPDATE email_messages SET is_read = 1 WHERE id = ?",
+                (msg_id,)
+            )
+
+        # 返回未读数量
+        with db.get_connection() as conn:
+            unread = conn.execute(
+                "SELECT COUNT(*) as count FROM email_messages WHERE account_id = ? AND is_read = 0",
+                (account_id,)
+            ).fetchone()
+
         return jsonify({
             'success': True,
             'message': {
@@ -1378,12 +1428,14 @@ def get_email_message_detail(account_id, msg_id):
                 'subject': msg['subject'],
                 'sender': msg['sender'],
                 'sender_email': msg['sender_email'],
+                'from_raw': msg['from_raw'],
                 'recipients': msg['recipients'],
                 'date': msg['date'],
                 'body': msg['body'],
                 'body_html': msg['body_html'],
                 'is_read': msg['is_read']
-            }
+            },
+            'unread_count': unread['count'] if unread else 0
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
