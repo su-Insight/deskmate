@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 DeskMate Backend Service - 生产级最终版
-集成功能：AI流式对话(动态厂商)、连接池复用、数据库持久化、任务管理、文件系统
+集成功能：AI流式对话(动态厂商)、连接池复用、数据库持久化、任务管理、文件系统、IMAP IDLE实时邮件推送
 """
 
 import os
@@ -22,17 +22,14 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from openai import OpenAI
 
+from services.imap_idle_service import IMAPIdleManager
+
 # ============================================
 # 1. 基础配置与性能优化
 # ============================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'data', 'deskmate.db')
-STORAGE_DIR = os.path.join(BASE_DIR, 'storage')
-INLINE_IMAGES_DIR = os.path.join(STORAGE_DIR, 'inline_images')
-
-# 确保 storage 目录存在
-os.makedirs(INLINE_IMAGES_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 app = Flask(__name__)
@@ -91,9 +88,21 @@ class DatabaseManager:
                 password TEXT NOT NULL,
                 imap_port INTEGER DEFAULT 993,
                 smtp_port INTEGER DEFAULT 465,
+                name TEXT,
+                note TEXT,
                 created_at INTEGER,
                 updated_at INTEGER
             )""")
+            
+            try:
+                conn.execute("ALTER TABLE email_accounts ADD COLUMN name TEXT")
+            except:
+                pass
+            
+            try:
+                conn.execute("ALTER TABLE email_accounts ADD COLUMN note TEXT")
+            except:
+                pass
 
             # 邮箱邮件表
             conn.execute("""CREATE TABLE IF NOT EXISTS email_messages (
@@ -133,20 +142,6 @@ class DatabaseManager:
                 conn.execute("ALTER TABLE email_messages ADD COLUMN recipients TEXT")
             except:
                 pass
-            
-            # 附件存储表
-            conn.execute("""CREATE TABLE IF NOT EXISTS email_attachments (
-                id TEXT PRIMARY KEY,
-                message_id TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                content_type TEXT,
-                content_id TEXT,
-                size INTEGER,
-                data BLOB,
-                is_inline INTEGER DEFAULT 0,
-                FOREIGN KEY(message_id) REFERENCES email_messages(id) ON DELETE CASCADE
-            )""")
-            
             defaults = [
                 ('api_key', '', 'secret', 'API密钥'),
                 ('base_url', 'https://api.openai.com/v1', 'string', 'API地址'),
@@ -156,7 +151,17 @@ class DatabaseManager:
             for k, v, t, d in defaults:
                 conn.execute("INSERT OR IGNORE INTO ai_config (config_key, config_value, config_type, description) VALUES (?, ?, ?, ?)", (k, v, t, d))
 
+    def get_email_account(self, account_id: str):
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM email_accounts WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
 db = DatabaseManager()
+
+imap_idle_manager: Optional[IMAPIdleManager] = None
 
 # ============================================
 # 3. 动态 AI 逻辑 (OpenRouter 风格)
@@ -406,6 +411,20 @@ def handle_config():
 @socketio.on('connect')
 def test_connect():
     emit('status', {'data': 'Connected'})
+
+@socketio.on('start_idle')
+def handle_start_idle(data):
+    account_id = data.get('account_id')
+    if account_id and imap_idle_manager:
+        success = imap_idle_manager.start_listening(account_id)
+        emit('idle_response', {'account_id': account_id, 'success': success})
+
+@socketio.on('stop_idle')
+def handle_stop_idle(data):
+    account_id = data.get('account_id')
+    if account_id and imap_idle_manager:
+        imap_idle_manager.stop_listening(account_id)
+        emit('idle_response', {'account_id': account_id, 'success': True})
 
 # ============================================
 # 8. SSH/SFTP 连接管理
@@ -842,20 +861,6 @@ def get_imap_connection(account):
         else:
             conn = imaplib.IMAP4(account['imap_host'], account['imap_port'])
         conn.login(account['username'], account['password'])
-        
-        # 针对网易系邮箱发送 ID 命令
-        host_str = account.get('imap_host', '').lower()
-        is_netease = any(d in host_str for d in ['163.com', '126.com', '188.com', 'yeah.net'])
-        
-        if is_netease or account.get('provider') in ['163', '126', '188']:
-            try:
-                imaplib.Commands['ID'] = ('AUTH', 'SELECTED')
-                args = ("name", "DeskMate", "version", "1.0.0", "vendor", "DeskMate", "contact", "support@deskmate.local")
-                typ, dat = conn._simple_command('ID', '("' + '" "'.join(args) + '")')
-                print(f"[IMAP] ID命令结果: {typ}")
-            except Exception as e:
-                print(f"[IMAP] ID命令失败(非致命): {e}")
-        
         return conn
     except Exception as e:
         print(f"[IMAP] 连接失败: {e}")
@@ -880,7 +885,7 @@ def get_email_accounts():
     try:
         with db.get_connection() as conn:
             accounts = conn.execute(
-                "SELECT id, email, provider, created_at FROM email_accounts ORDER BY created_at DESC"
+                "SELECT id, email, provider, name, note, created_at FROM email_accounts ORDER BY created_at DESC"
             ).fetchall()
 
         # 获取每个账户的未读邮件数
@@ -896,6 +901,8 @@ def get_email_accounts():
                 'id': acc['id'],
                 'email': acc['email'],
                 'provider': acc['provider'],
+                'name': acc['name'] or '',
+                'note': acc['note'] or '',
                 'unread_count': unread['count'] if unread else 0,
                 'created_at': acc['created_at']
             })
@@ -913,6 +920,8 @@ def add_email_account():
         email = data.get('email', '').strip().lower()
         password = data.get('password', '').strip()
         provider = data.get('provider', '').strip()
+        name = data.get('name', '').strip()
+        note = data.get('note', '').strip()
 
         if not email or not password or not provider:
             return jsonify({'success': False, 'error': '请填写完整信息'}), 400
@@ -974,13 +983,14 @@ def add_email_account():
         with db.get_connection() as conn:
             conn.execute("""
                 INSERT INTO email_accounts
-                (id, email, provider, imap_host, smtp_host, username, password, imap_port, smtp_port, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, email, provider, imap_host, smtp_host, username, password, imap_port, smtp_port, name, note, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 account_id, email, provider,
                 provider_config['imap_host'], provider_config['smtp_host'],
                 username, password,
                 provider_config['imap_port'], provider_config['smtp_port'],
+                name or None, note or None,
                 now, now
             ))
 
@@ -995,7 +1005,7 @@ def get_email_account(account_id):
     try:
         with db.get_connection() as conn:
             acc = conn.execute(
-                "SELECT id, email, provider, username, password, imap_host, imap_port, smtp_host, smtp_port FROM email_accounts WHERE id = ?",
+                "SELECT id, email, provider, username, password, imap_host, imap_port, smtp_host, smtp_port, name, note FROM email_accounts WHERE id = ?",
                 (account_id,)
             ).fetchone()
 
@@ -1013,7 +1023,9 @@ def get_email_account(account_id):
                 'imap_host': acc['imap_host'],
                 'imap_port': acc['imap_port'],
                 'smtp_host': acc['smtp_host'],
-                'smtp_port': acc['smtp_port']
+                'smtp_port': acc['smtp_port'],
+                'name': acc['name'] or '',
+                'note': acc['note'] or ''
             }
         })
     except Exception as e:
@@ -1024,6 +1036,9 @@ def get_email_account(account_id):
 def delete_email_account(account_id):
     """删除邮箱账户"""
     try:
+        if imap_idle_manager:
+            imap_idle_manager.stop_listening(account_id)
+        
         with db.get_connection() as conn:
             conn.execute("DELETE FROM email_messages WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM email_accounts WHERE id = ?", (account_id,))
@@ -1038,8 +1053,10 @@ def update_email_account(account_id):
     try:
         data = request.get_json() or {}
         email = data.get('email', '').strip().lower()
-        password = data.get('password', '').strip()  # 可选，留空则不更新密码
+        password = data.get('password', '').strip()
         provider = data.get('provider', '').strip()
+        name = data.get('name', '').strip()
+        note = data.get('note', '').strip()
 
         if not email or not provider:
             return jsonify({'success': False, 'error': '邮箱地址和提供商不能为空'}), 400
@@ -1089,32 +1106,91 @@ def update_email_account(account_id):
                     UPDATE email_accounts
                     SET email = ?, provider = ?, imap_host = ?, smtp_host = ?,
                         username = ?, password = ?, imap_port = ?, smtp_port = ?,
-                        updated_at = ?
+                        name = ?, note = ?, updated_at = ?
                     WHERE id = ?
                 """, (
                     email, provider,
                     provider_config['imap_host'], provider_config['smtp_host'],
                     username, password,
                     provider_config['imap_port'], provider_config['smtp_port'],
+                    name or None, note or None,
                     now, account_id
                 ))
             else:
-                # 不更新密码
                 conn.execute("""
                     UPDATE email_accounts
                     SET email = ?, provider = ?, imap_host = ?, smtp_host = ?,
                         username = ?, imap_port = ?, smtp_port = ?,
-                        updated_at = ?
+                        name = ?, note = ?, updated_at = ?
                     WHERE id = ?
                 """, (
                     email, provider,
                     provider_config['imap_host'], provider_config['smtp_host'],
                     username,
                     provider_config['imap_port'], provider_config['smtp_port'],
+                    name or None, note or None,
                     now, account_id
                 ))
 
         return jsonify({'success': True, 'email': email})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/idle/start', methods=['POST'])
+def start_idle_monitoring(account_id):
+    """启动 IMAP IDLE 实时监听"""
+    try:
+        if not imap_idle_manager:
+            return jsonify({'success': False, 'error': 'IDLE服务未初始化'}), 500
+        
+        success = imap_idle_manager.start_listening(account_id)
+        if success:
+            return jsonify({'success': True, 'message': '开始实时监听'})
+        else:
+            return jsonify({'success': False, 'error': '启动监听失败'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/idle/stop', methods=['POST'])
+def stop_idle_monitoring(account_id):
+    """停止 IMAP IDLE 实时监听"""
+    try:
+        if imap_idle_manager:
+            imap_idle_manager.stop_listening(account_id)
+        return jsonify({'success': True, 'message': '已停止监听'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/accounts/<account_id>/idle/status', methods=['GET'])
+def get_idle_status(account_id):
+    """获取 IDLE 监听状态"""
+    try:
+        if not imap_idle_manager:
+            return jsonify({'success': True, 'status': 'unavailable'})
+        
+        status = imap_idle_manager.get_status(account_id)
+        is_listening = imap_idle_manager.is_listening(account_id)
+        return jsonify({
+            'success': True,
+            'status': status.get(account_id, 'stopped'),
+            'is_listening': is_listening
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/email/idle/status', methods=['GET'])
+def get_all_idle_status():
+    """获取所有账户的 IDLE 监听状态"""
+    try:
+        if not imap_idle_manager:
+            return jsonify({'success': True, 'statuses': {}})
+        
+        statuses = imap_idle_manager.get_status()
+        return jsonify({'success': True, 'statuses': statuses})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1216,34 +1292,50 @@ def sync_email_messages(account_id):
         except Exception as e:
             return jsonify({'success': False, 'error': f'连接/登录失败: {str(e)}'}), 500
 
-        # 3. 搜索邮件（使用 UID）
-        email_uids = []
+        # 3. 搜索邮件
+        email_ids = []
         try:
-            # 使用 UID SEARCH 搜索未读邮件
-            status, messages = imap_conn.uid('SEARCH', None, 'UNSEEN')
+            status, messages = imap_conn.search(None, 'UNSEEN')
             if status == 'OK':
-                email_uids = messages[0].split()
+                email_ids = messages[0].split()
+        except Exception:
+            pass
+        
+        all_email_ids = []
+        try:
+            status, messages = imap_conn.search(None, 'ALL')
+            if status == 'OK':
+                all_email_ids = messages[0].split()
         except Exception:
             pass
 
-        fetched_emails = [] # 用于返回给前端的列表
+        fetched_emails = []
         fetched_count = 0
         now = int(datetime.now().timestamp())
-
-        # 限制单次同步数量，防止超时
-        process_uids = email_uids[-20:] if email_uids else [] 
         
-        if process_uids:
-            print(f"[邮件同步] 发现 {len(process_uids)} 封未读邮件")
-
-        for uid in process_uids:
+        with db.get_connection() as db_conn:
+            local_uids = set()
+            for row in db_conn.execute("SELECT uid FROM email_messages WHERE account_id = ?", (account_id,)):
+                local_uids.add(str(row['uid']))
+        
+        process_ids = email_ids[-20:] if email_ids else []
+        
+        if process_ids:
+            print(f"[邮件同步] 发现 {len(process_ids)} 封未读邮件")
+        
+        for email_id in process_ids:
             try:
-                # 使用 UID FETCH 获取邮件
-                status, msg_data = imap_conn.uid('FETCH', uid, '(RFC822)')
+                status, msg_data = imap_conn.fetch(email_id, '(RFC822 FLAGS)')
                 if status != 'OK': continue
 
                 raw_email = msg_data[0][1]
                 msg = email.message_from_bytes(raw_email)
+                
+                uid_str = str(email_id.decode())
+                
+                if uid_str in local_uids:
+                    print(f"[邮件同步] 邮件已存在本地，跳过: {uid_str}")
+                    continue
 
                 # --- 基础信息解析 ---
                 subject = decode_text(msg.get('subject', '无主题'))
@@ -1262,100 +1354,47 @@ def sync_email_messages(account_id):
                 body = ''
                 body_html = ''
                 attachments = []
-                inline_images = {}
 
                 def parse_part(part):
                     """递归解析邮件部分"""
-                    nonlocal body, body_html, attachments, inline_images
+                    nonlocal body, body_html
                     try:
                         content_type = part.get_content_type()
                         content_disposition = str(part.get('Content-Disposition', ''))
-                        content_id = part.get('Content-ID', '')
 
                         # 获取文件名
                         filename = part.get_filename()
-                        if filename:
-                            filename = decode_text(filename)
 
-                        # 获取附件内容
-                        payload = part.get_payload(decode=True)
-                        
-                        # 调试：打印所有非文本部分
-                        if not content_type.startswith('text/'):
-                            print(f"[调试] 非文本部分: type={content_type}, cid={content_id}, filename={filename}, disposition={content_disposition}")
-                        
-                        # 检查是否是图片（通过 Content-Type 或文件扩展名）
-                        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')
-                        is_image = content_type.startswith('image/') or (filename and filename.lower().endswith(image_extensions))
-                        
-                        # === 内嵌图片处理 ===
-                        if is_image:
-                            # 有 Content-ID 的图片
-                            if content_id:
-                                cid = content_id.strip('<>')
-                                # 根据文件扩展名确定实际类型
-                                actual_type = content_type
-                                if filename:
-                                    ext = filename.lower().rsplit('.', 1)[-1]
-                                    type_map = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp', 'bmp': 'image/bmp'}
-                                    if ext in type_map:
-                                        actual_type = type_map[ext]
-                                inline_images[cid] = {
-                                    'filename': filename or f"image_{len(inline_images) + 1}",
-                                    'content_type': actual_type,
-                                    'data': payload,
-                                    'size': len(payload) if payload else 0
-                                }
-                                print(f"[调试] 添加内嵌图片(CID): {cid}")
-                                return
-                            # inline disposition 的图片
-                            elif 'inline' in content_disposition.lower():
-                                if filename:
-                                    inline_images[filename] = {
-                                        'filename': filename,
-                                        'content_type': content_type,
-                                        'data': payload,
-                                        'size': len(payload) if payload else 0
-                                    }
-                                    print(f"[调试] 添加内嵌图片(inline): {filename}")
-                                    return
-                            # 有文件名但没有明确标记为 attachment 的图片，也作为内嵌图片
-                            elif filename and 'attachment' not in content_disposition.lower():
-                                inline_images[filename] = {
-                                    'filename': filename,
-                                    'content_type': content_type,
-                                    'data': payload,
-                                    'size': len(payload) if payload else 0
-                                }
-                                print(f"[调试] 添加内嵌图片(文件名): {filename}")
-                                return
-
-                        # === 真正的附件处理 ===
-                        if filename or 'attachment' in content_disposition.lower():
-                            if not filename:
+                        # === 附件处理逻辑 ===
+                        if filename or 'attachment' in content_disposition:
+                            if filename:
+                                filename = decode_text(filename)
+                            else:
                                 filename = "unknown_file"
 
+                            # 获取附件大小
+                            payload = part.get_payload(decode=True)
+                            size = len(payload) if payload else 0
+
                             attachments.append({
-                                'id': str(uuid.uuid4()),
                                 'filename': filename,
-                                'size': len(payload) if payload else 0,
-                                'content_type': content_type,
-                                'data': payload
+                                'size': size,
+                                'content_type': content_type
                             })
                             return
 
                         # === 正文处理逻辑 ===
-                        if content_type == 'text/html' or content_type == 'text/plain':
-                            try:
-                                charset = part.get_content_charset() or 'utf-8'
-                                content = payload.decode(charset, errors='ignore')
-                            except:
-                                content = str(part.get_payload())
+                        try:
+                            payload = part.get_payload(decode=True)
+                            charset = part.get_content_charset() or 'utf-8'
+                            content = payload.decode(charset, errors='ignore')
+                        except:
+                            content = str(part.get_payload())
 
-                            if content_type == 'text/html':
-                                body_html += content
-                            elif content_type == 'text/plain':
-                                body += content
+                        if content_type == 'text/html':
+                            body_html += content
+                        elif content_type == 'text/plain':
+                            body += content
                     except Exception as e:
                         print(f"[邮件解析] 解析部分失败: {e}")
 
@@ -1370,57 +1409,6 @@ def sync_email_messages(account_id):
 
                 walk_parts(msg)
 
-                # --- 将内嵌图片保存到本地文件 ---
-                def detect_image_extension(data):
-                    """根据图片数据头部检测文件扩展名"""
-                    if not data or len(data) < 8:
-                        return 'png'
-                    if data[:8] == b'\x89PNG\r\n\x1a\n':
-                        return 'png'
-                    elif data[:2] == b'\xff\xd8':
-                        return 'jpg'
-                    elif data[:6] in (b'GIF87a', b'GIF89a'):
-                        return 'gif'
-                    elif data[:4] == b'RIFF' and len(data) > 12 and data[8:12] == b'WEBP':
-                        return 'webp'
-                    return 'png'
-                
-                print(f"[调试] 内嵌图片数量: {len(inline_images)}, keys: {list(inline_images.keys())}")
-                for cid, img_info in inline_images.items():
-                    if img_info['data']:
-                        ext = detect_image_extension(img_info['data'])
-                        safe_cid = re.sub(r'[<>:"/\\|?*]', '_', cid)
-                        filename = f"{msg_uuid}_{safe_cid}.{ext}"
-                        filepath = os.path.join(INLINE_IMAGES_DIR, filename)
-                        
-                        with open(filepath, 'wb') as f:
-                            f.write(img_info['data'])
-                        
-                        img_url = f"http://127.0.0.1:5000/api/email/inline-images/{filename}"
-                        print(f"[调试] 替换 CID: {cid} -> {img_url}")
-                        body_html = body_html.replace(f'cid:{cid}', img_url)
-                        body_html = body_html.replace(f'src="cid:{cid}"', f'src="{img_url}"')
-                        body_html = body_html.replace(f"src='cid:{cid}'", f"src='{img_url}'")
-                
-                import re
-                remaining_cids = re.findall(r'cid:([^"\'\s>]+)', body_html)
-                if remaining_cids:
-                    print(f"[调试] 未替换的 CID: {remaining_cids}")
-                    for remaining_cid in remaining_cids:
-                        for stored_cid, img_info in inline_images.items():
-                            if remaining_cid.lower() in stored_cid.lower() or stored_cid.lower() in remaining_cid.lower():
-                                ext = detect_image_extension(img_info['data'])
-                                safe_cid = re.sub(r'[<>:"/\\|?*]', '_', stored_cid)
-                                filename = f"{msg_uuid}_{safe_cid}.{ext}"
-                                filepath = os.path.join(INLINE_IMAGES_DIR, filename)
-                                
-                                with open(filepath, 'wb') as f:
-                                    f.write(img_info['data'])
-                                
-                                img_url = f"http://127.0.0.1:5000/api/email/inline-images/{filename}"
-                                body_html = body_html.replace(f'cid:{remaining_cid}', img_url)
-                                break
-
                 # --- 原始发件人逻辑 ---
                 # 1. 优先看 Reply-To
                 reply_to = decode_text(msg.get('Reply-To', ''))
@@ -1434,19 +1422,17 @@ def sync_email_messages(account_id):
 
                 msg_uuid = str(uuid.uuid4())
                 
-                uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
-                
-                # 构造数据对象 (不包含附件数据，附件单独存储)
+                # 构造数据对象
                 email_data = {
                     'id': msg_uuid,
                     'account_id': account_id,
-                    'uid': uid_str,
+                    'uid': str(email_id.decode()), # IMAP UID
                     'subject': subject,
-                    'sender': original_sender_info,
+                    'sender': original_sender_info, # 使用处理过的原始发件人信息
                     'sender_email': sender_email,
-                    'body': body[:10000],
+                    'body': body[:10000], # 截断防止过大
                     'body_html': body_html[:50000],
-                    'attachments': json.dumps([{'id': a['id'], 'filename': a['filename'], 'size': a['size'], 'content_type': a['content_type']} for a in attachments]),
+                    'attachments': json.dumps(attachments), # 序列化附件列表
                     'date': date,
                     'is_read': 0,
                     'fetched_at': now
@@ -1454,40 +1440,62 @@ def sync_email_messages(account_id):
 
                 # --- 存入数据库 ---
                 with db.get_connection() as db_conn:
-                    cursor = db_conn.cursor()
-                    cursor.execute("""
+                    # 假设你已经修改了数据库表，增加了 attachments 字段
+                    # 如果没有修改表，请先执行 SQL ALTER TABLE
+                    db_conn.execute("""
                         INSERT OR IGNORE INTO email_messages
                         (id, account_id, uid, subject, sender, sender_email, 
                          date, body, body_html, is_read, folder, fetched_at, attachments)
                         VALUES (:id, :account_id, :uid, :subject, :sender, :sender_email, 
                                 :date, :body, :body_html, :is_read, 'INBOX', :fetched_at, :attachments)
                     """, email_data)
+                    fetched_count += 1
                     
-                    if cursor.rowcount > 0:
-                        # 保存附件到附件表
-                        for att in attachments:
-                            cursor.execute("""
-                                INSERT INTO email_attachments (id, message_id, filename, content_type, size, data)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                            """, (att['id'], msg_uuid, att['filename'], att['content_type'], att['size'], att['data']))
-                        
-                        fetched_count += 1
-                        email_data['attachments'] = [{'id': a['id'], 'filename': a['filename'], 'size': a['size'], 'content_type': a['content_type']} for a in attachments]
-                        fetched_emails.append(email_data)
-                        print(f"[邮件同步] 新邮件: {subject[:30]} | 附件: {len(attachments)}")
-                    else:
-                        print(f"[邮件同步] 邮件已存在: {subject[:30]}")
+                    # 转换 attachments 为对象返回给前端，而不是 JSON 字符串
+                    email_data['attachments'] = attachments
+                    fetched_emails.append(email_data)
+
+                print(f"[邮件同步] 已处理: {subject[:20]} | 附件: {len(attachments)}")
 
             except Exception as e:
-                print(f"[邮件同步] 处理单封邮件失败 {uid}: {e}")
+                print(f"[邮件同步] 处理单封邮件失败 {email_id}: {e}")
                 continue
+        
+        if local_uids and all_email_ids:
+            print(f"[邮件同步] 检查本地邮件的远程已读状态...")
+            read_count = 0
+            for check_id in all_email_ids[-100:]:
+                try:
+                    uid_str = str(check_id.decode())
+                    if uid_str not in local_uids:
+                        continue
+                    
+                    status, msg_data = imap_conn.fetch(check_id, '(FLAGS)')
+                    if status != 'OK':
+                        continue
+                    
+                    flags = msg_data[0][0] if msg_data else b''
+                    flags_str = flags.decode('utf-8', errors='ignore') if isinstance(flags, bytes) else str(flags)
+                    
+                    if '\\Seen' in flags_str:
+                        with db.get_connection() as db_conn:
+                            db_conn.execute(
+                                "UPDATE email_messages SET is_read = 1 WHERE account_id = ? AND uid = ? AND is_read = 0",
+                                (account_id, uid_str)
+                            )
+                        read_count += 1
+                except Exception as e:
+                    continue
+            
+            if read_count > 0:
+                print(f"[邮件同步] 更新了 {read_count} 封本地邮件为已读状态")
 
         imap_conn.logout()
 
         return jsonify({
             'success': True,
             'fetched_count': fetched_count,
-            'messages': fetched_emails # 直接返回抓取到的邮件内容
+            'messages': fetched_emails
         })
 
     except Exception as e:
@@ -1581,66 +1589,10 @@ def get_email_message_detail(account_id, msg_id):
                 'date': msg['date'],
                 'body': msg['body'],
                 'body_html': msg['body_html'],
-                'is_read': msg['is_read'],
-                'attachments': json.loads(msg['attachments']) if msg['attachments'] else []
+                'is_read': msg['is_read']
             },
             'unread_count': unread['count'] if unread else 0
         })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/email/attachments/<attachment_id>', methods=['GET'])
-def download_email_attachment(attachment_id):
-    """下载附件"""
-    try:
-        with db.get_connection() as conn:
-            att = conn.execute(
-                "SELECT * FROM email_attachments WHERE id = ?",
-                (attachment_id,)
-            ).fetchone()
-
-        if not att:
-            return jsonify({'success': False, 'error': '附件不存在'}), 404
-
-        from flask import Response
-        response = Response(
-            att['data'],
-            mimetype=att['content_type'] or 'application/octet-stream',
-            headers={
-                'Content-Disposition': f'attachment; filename="{att["filename"]}"',
-                'Content-Length': att['size']
-            }
-        )
-        return response
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/email/inline-images/<filename>', methods=['GET'])
-def get_inline_image(filename):
-    """获取内嵌图片"""
-    try:
-        safe_filename = os.path.basename(filename)
-        if not safe_filename:
-            return jsonify({'success': False, 'error': '无效的文件名'}), 400
-        
-        filepath = os.path.join(INLINE_IMAGES_DIR, safe_filename)
-        if not os.path.exists(filepath):
-            return jsonify({'success': False, 'error': '图片不存在'}), 404
-        
-        ext = safe_filename.rsplit('.', 1)[-1].lower()
-        mime_types = {
-            'png': 'image/png',
-            'jpg': 'image/jpeg',
-            'jpeg': 'image/jpeg',
-            'gif': 'image/gif',
-            'webp': 'image/webp'
-        }
-        mime_type = mime_types.get(ext, 'application/octet-stream')
-        
-        from flask import send_file
-        return send_file(filepath, mimetype=mime_type)
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -1737,40 +1689,15 @@ def mark_single_as_read(account_id, msg_id):
         # 连接到 IMAP 并标记该邮件为已读
         try:
             imap_conn = get_imap_connection(dict(account))
-            select_result = imap_conn.select('INBOX', readonly=False)
-            print(f"[IMAP] 选择INBOX结果: {select_result}")
+            imap_conn.select('INBOX')
 
             # 使用 UID 标记已读
             if msg['uid']:
-                uid = str(msg['uid'])
-                print(f"[IMAP] 尝试标记已读: UID={uid}")
-                
-                # 先查看邮件当前的 FLAGS
-                before_flags = imap_conn.uid('FETCH', uid, '(FLAGS)')
-                print(f"[IMAP] 标记前FLAGS: {before_flags}")
-                
-                # 如果 UID 不存在，尝试用 UID SEARCH 搜索
-                if before_flags[1] == [None] or not before_flags[1]:
-                    print(f"[IMAP] UID {uid} 不存在，使用UID SEARCH搜索...")
-                    status, search_data = imap_conn.uid('SEARCH', None, 'ALL')
-                    print(f"[IMAP] UID SEARCH结果: {status}, {search_data}")
-                    if search_data[0]:
-                        all_uids = search_data[0].split()
-                        print(f"[IMAP] INBOX中共有 {len(all_uids)} 封邮件，UIDs: {all_uids[-5:]}")
-                        # 查看最后几封邮件的 FLAGS
-                        for test_uid in all_uids[-3:]:
-                            test_flags = imap_conn.uid('FETCH', test_uid.decode() if isinstance(test_uid, bytes) else test_uid, '(FLAGS)')
-                            print(f"[IMAP] UID {test_uid}: {test_flags}")
-                
-                # 标记为已读
-                result = imap_conn.uid('STORE', uid, '+FLAGS', '\\Seen')
-                print(f"[IMAP] 标记结果: {result}")
-                
-                # 验证是否标记成功
-                after_flags = imap_conn.uid('FETCH', uid, '(FLAGS)')
-                print(f"[IMAP] 标记后FLAGS: {after_flags}")
+                try:
+                    imap_conn.uid('STORE', msg['uid'], '+FLAGS', '\\Seen')
+                except:
+                    pass
 
-            imap_conn.close()
             imap_conn.logout()
         except Exception as e:
             print(f"[IMAP] 标记已读失败: {e}")
@@ -1823,4 +1750,8 @@ def get_reply_url(account_id, msg_id):
 
 if __name__ == '__main__':
     print(f"DeskMate Backend 运行中... 数据库: {DB_PATH}")
+    
+    imap_idle_manager = IMAPIdleManager(socketio, db)
+    print("IMAP IDLE 实时邮件推送服务已启动")
+    
     socketio.run(app, host='127.0.0.1', port=5000, debug=True)

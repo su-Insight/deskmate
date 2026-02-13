@@ -368,33 +368,23 @@ def mark_single_read(account_id: str, msg_id: str) -> dict:
         return {'success': False, 'error': '邮件不存在'}
 
     try:
-        imap_conn = get_imap_connection(dict(account))
-        select_result = imap_conn.select('INBOX', readonly=False)
-        print(f"[IMAP] 选择INBOX结果: {select_result}")
-
+        ctx = ssl.create_default_context()
+        imap_conn = imaplib.IMAP4_SSL(account['imap_host'], account['imap_port'], ssl_context=ctx)
+        
+        username = account['username']
+        if account['provider'] == 'qq' and '@' in username:
+            username = username.split('@')[0]
+        
+        imap_conn.login(username, account['password'])
+        
+        imap_conn.select('INBOX', readonly=False)
+        
         if msg['uid']:
             uid = str(msg['uid'])
             print(f"[IMAP] 尝试标记已读: UID={uid}")
             
-            before_flags = imap_conn.uid('FETCH', uid, '(FLAGS)')
-            print(f"[IMAP] 标记前FLAGS: {before_flags}")
-            
-            if before_flags[1] == [None] or not before_flags[1]:
-                print(f"[IMAP] UID {uid} 不存在，使用UID SEARCH搜索...")
-                status, search_data = imap_conn.uid('SEARCH', None, 'ALL')
-                print(f"[IMAP] UID SEARCH结果: {status}, {search_data}")
-                if search_data[0]:
-                    all_uids = search_data[0].split()
-                    print(f"[IMAP] INBOX中共有 {len(all_uids)} 封邮件，UIDs: {all_uids[-5:]}")
-                    for test_uid in all_uids[-3:]:
-                        test_flags = imap_conn.uid('FETCH', test_uid.decode() if isinstance(test_uid, bytes) else test_uid, '(FLAGS)')
-                        print(f"[IMAP] UID {test_uid}: {test_flags}")
-            
             result = imap_conn.uid('STORE', uid, '+FLAGS', '\\Seen')
             print(f"[IMAP] 标记结果: {result}")
-            
-            after_flags = imap_conn.uid('FETCH', uid, '(FLAGS)')
-            print(f"[IMAP] 标记后FLAGS: {after_flags}")
 
         imap_conn.close()
         imap_conn.logout()

@@ -76,7 +76,15 @@ def get_imap_connection(account):
             conn = imaplib.IMAP4_SSL(account['imap_host'], account['imap_port'], ssl_context=context)
         else:
             conn = imaplib.IMAP4(account['imap_host'], account['imap_port'])
-        conn.login(account['username'], account['password'])
+        
+        username = account['username']
+        provider = account.get('provider', '').lower()
+        
+        if provider == 'qq':
+            if '@' in username:
+                username = username.split('@')[0]
+        
+        conn.login(username, account['password'])
         
         host_str = account.get('imap_host', '').lower()
         is_netease = any(d in host_str for d in ['163.com', '126.com', '188.com', 'yeah.net'])

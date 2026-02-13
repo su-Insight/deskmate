@@ -4,20 +4,20 @@ import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import remarkGfm from 'remark-gfm';
+import { io, Socket } from 'socket.io-client';
 
 const iconModules = import.meta.glob('../../public/icons/*.svg', { eager: true, as: 'url' });
+const emailIconModules = import.meta.glob('../../public/icons/email/*.png', { eager: true, as: 'url' });
 
-// 2. 辅助函数
 function getProviderIconUrl(providerId: string | undefined): string {
   if (!providerId) return '';
-
-  // 构建 key，注意这里要匹配 glob 里的相对路径写法
   const key = `../renderer/icons/${providerId}.svg`;
-
   return key
-  
-  // 返回 Vite 处理后的最终路径 (开发时是 /src/..., 打包后是 assets/xxx.hash.svg)
-  // return iconModules[key] || '';
+}
+
+function getEmailIconUrl(provider: string): string | undefined {
+  const key = `../renderer/icons/email/${provider}.png`;
+  return (emailIconModules as Record<string, string>)[key];
 }
 
 // 扩展 Window 接口以支持 deskmate
@@ -110,12 +110,84 @@ function App() {
   const panelRef = useRef<HTMLDivElement>(null);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
+  const prevNavRef = useRef<string>('workspace');
+
+  const [featureToggles, setFeatureToggles] = useState(() => {
+    const saved = localStorage.getItem('deskmate_featureToggles');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return { ai: true, email: true, secrets: false, tasks: true, calendar: false, files: true };
+      }
+    }
+    return { ai: true, email: true, secrets: false, tasks: true, calendar: false, files: true };
+  });
+
+  const [aiPanelFoldMode, setAiPanelFoldMode] = useState(() => {
+    const saved = localStorage.getItem('deskmate_aiPanelFoldMode');
+    return saved || 'manual';
+  });
+
+  useEffect(() => {
+    const handleStorageChange = () => {
+      const saved = localStorage.getItem('deskmate_featureToggles');
+      if (saved) {
+        try {
+          setFeatureToggles(JSON.parse(saved));
+        } catch {}
+      }
+      const foldMode = localStorage.getItem('deskmate_aiPanelFoldMode');
+      if (foldMode) {
+        setAiPanelFoldMode(foldMode);
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    const interval = setInterval(() => {
+      const saved = localStorage.getItem('deskmate_featureToggles');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (JSON.stringify(parsed) !== JSON.stringify(featureToggles)) {
+            setFeatureToggles(parsed);
+          }
+        } catch {}
+      }
+      const foldMode = localStorage.getItem('deskmate_aiPanelFoldMode');
+      if (foldMode && foldMode !== aiPanelFoldMode) {
+        setAiPanelFoldMode(foldMode);
+      }
+    }, 1000);
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      clearInterval(interval);
+    };
+  }, [featureToggles, aiPanelFoldMode]);
 
   const api = (window as any).deskmate;
 
   useEffect(() => {
     api?.profile?.get?.();
   }, []);
+
+  useEffect(() => {
+    const handleNavigateToAI = () => {
+      setActiveNav('ai');
+    };
+    window.addEventListener('navigateToAI', handleNavigateToAI);
+    return () => {
+      window.removeEventListener('navigateToAI', handleNavigateToAI);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (aiPanelFoldMode === 'auto' && prevNavRef.current !== activeNav) {
+      if (!isRightPanelCollapsed) {
+        setIsRightPanelCollapsed(true);
+      }
+    }
+    prevNavRef.current = activeNav;
+  }, [activeNav, aiPanelFoldMode, isRightPanelCollapsed]);
 
   const handleSendMessage = useCallback(async () => {
     if (!inputMessage.trim() || isTyping) return;
@@ -181,15 +253,19 @@ function App() {
     }
   }, [isDragging, handleMouseMove, handleMouseUp]);
 
-  const navItems = [
+  const allNavItems = [
     { id: 'workspace', icon: 'fa-th' },
-    { id: 'files', icon: 'fa-folder' },
-    { id: 'secrets', icon: 'fa-key' },
-    { id: 'tasks', icon: 'fa-check-square' },
-    { id: 'calendar', icon: 'fa-calendar' },
-    { id: 'email', icon: 'fa-envelope' },
-    { id: 'ai', icon: 'fa-robot' },
+    { id: 'files', icon: 'fa-folder', feature: 'files' },
+    { id: 'secrets', icon: 'fa-key', feature: 'secrets' },
+    { id: 'tasks', icon: 'fa-check-square', feature: 'tasks' },
+    { id: 'calendar', icon: 'fa-calendar', feature: 'calendar' },
+    { id: 'email', icon: 'fa-envelope', feature: 'email' },
+    { id: 'ai', icon: 'fa-robot', feature: 'ai' },
   ];
+
+  const navItems = allNavItems.filter(item => !item.feature || featureToggles[item.feature]);
+
+  const isAIFullScreen = activeNav === 'ai' && featureToggles.ai;
 
   return (
     <div className="app-container">
@@ -222,43 +298,40 @@ function App() {
       </aside>
 
       {/* Main Content */}
-      <main className="main-content">
+      <main className="main-content" style={{ 
+        opacity: isAIFullScreen ? 0 : 1,
+        visibility: isAIFullScreen ? 'hidden' : 'visible',
+        position: isAIFullScreen ? 'absolute' : 'relative',
+        transition: 'opacity 0.25s ease, visibility 0.25s ease'
+      }}>
         {activeNav === 'workspace' && <DashboardView />}
-        {activeNav === 'files' && <FilesView />}
-        {activeNav === 'secrets' && <SecretsView />}
-        {activeNav === 'tasks' && <TasksView />}
-        {activeNav === 'calendar' && <CalendarView />}
-        {activeNav === 'email' && <EmailView />}
-        {activeNav === 'ai' && (
-          <AIChatView
-            messages={messages}
-            inputMessage={inputMessage}
-            isTyping={isTyping}
-            onInputChange={setInputMessage}
-            onSend={handleSendMessage}
-            onKeyPress={handleKeyPress}
-          />
-        )}
-        {activeNav === 'settings' && <SettingsView />}
+        {activeNav === 'files' && featureToggles.files && <FilesView />}
+        {activeNav === 'secrets' && featureToggles.secrets && <SecretsView />}
+        {activeNav === 'tasks' && featureToggles.tasks && <TasksView />}
+        {activeNav === 'calendar' && featureToggles.calendar && <CalendarView />}
+        {activeNav === 'email' && featureToggles.email && <EmailView />}
+        {activeNav === 'ai-settings' && <SettingsView />}
+        {activeNav === 'settings' && <GeneralSettingsView />}
       </main>
 
-      {/* Right Panel */}
+      {/* Right Panel - AI Chat */}
       <div
         ref={panelRef}
         style={{
-          width: isRightPanelCollapsed ? 48 : rightPanelWidth,
-          flexShrink: 0,
+          width: isAIFullScreen ? '100%' : (isRightPanelCollapsed ? 48 : rightPanelWidth),
           background: 'var(--surface-white)',
-          borderLeft: '1px solid rgba(0,0,0,0.06)',
+          borderLeft: isAIFullScreen ? 'none' : '1px solid rgba(0,0,0,0.06)',
           display: 'flex',
           flexDirection: 'column',
-          transition: isDragging ? 'none' : 'width 0.2s ease',
+          transition: isDragging ? 'none' : 'width 0.25s ease-out',
           overflow: 'hidden',
-          position: 'relative'
+          position: 'relative',
+          marginLeft: isAIFullScreen ? 'auto' : 0,
+          willChange: 'width'
         }}
       >
         {/* Resize Handle */}
-        {!isRightPanelCollapsed && (
+        {!isRightPanelCollapsed && !isAIFullScreen && (
           <div
             onMouseDown={handleMouseDown}
             className="resize-handle"
@@ -286,8 +359,35 @@ function App() {
           </div>
         )}
 
-        {/* Collapse/Expand Button - Inside Panel */}
-        {!isRightPanelCollapsed ? (
+        {/* Panel Content */}
+        {isAIFullScreen ? (
+          <>
+            <CommunicationPanel messages={messages} onNavigate={setActiveNav} isFullScreen={true} />
+            <div
+              onClick={() => setActiveNav('workspace')}
+              style={{
+                position: 'absolute',
+                left: '12px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                zIndex: 20,
+                cursor: 'pointer',
+                width: '32px',
+                height: '32px',
+                borderRadius: '8px',
+                background: 'rgba(0,0,0,0.04)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#6B7280',
+                transition: 'all 0.2s ease'
+              }}
+              title="退出全屏"
+            >
+              <i className="fa-solid fa-arrow-right" style={{ fontSize: '12px' }}></i>
+            </div>
+          </>
+        ) : !isRightPanelCollapsed ? (
           <>
             <CommunicationPanel messages={messages} onNavigate={setActiveNav} />
             <div
@@ -2779,6 +2879,8 @@ function EmailView() {
     provider: string;
     unread_count: number;
     created_at: number;
+    name?: string;
+    note?: string;
   }>>([]);
   const [providers, setProviders] = useState<Array<{id: string, name: string, icon: string}>>([]);
   const [loading, setLoading] = useState(true);
@@ -2796,25 +2898,136 @@ function EmailView() {
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [showToast, setShowToast] = useState<{msg: string, type: string} | null>(null);
+  const [pendingNewEmails, setPendingNewEmails] = useState<Record<string, number>>({});
+  
+  const [idleStatus, setIdleStatus] = useState<Record<string, string>>({});
+  const socketRef = useRef<Socket | null>(null);
+  const socketConnected = useRef(false);
+  const selectedAccountRef = useRef<string | null>(null);
+  
+  useEffect(() => {
+    selectedAccountRef.current = selectedAccount;
+  }, [selectedAccount]);
 
   // 添加邮箱表单
   const [newEmail, setNewEmail] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newProvider, setNewProvider] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newNote, setNewNote] = useState('');
   const [adding, setAdding] = useState(false);
 
   // 编辑邮箱表单
   const [editEmail, setEditEmail] = useState('');
   const [editPassword, setEditPassword] = useState('');
   const [editProvider, setEditProvider] = useState('');
+  const [editName, setEditName] = useState('');
+  const [editNote, setEditNote] = useState('');
   const [editing, setEditing] = useState(false);
   const [showEditPassword, setShowEditPassword] = useState(false);
+  
+  useEffect(() => {
+    const serverUrl = getServerUrl('');
+    const socketUrl = serverUrl.replace(/\/$/, '');
+    
+    socketRef.current = io(socketUrl, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+    });
+    
+    socketRef.current.on('connect', () => {
+      console.log('[Socket] 已连接到服务器');
+      socketConnected.current = true;
+    });
+    
+    socketRef.current.on('connect_error', (error: any) => {
+      console.error('[Socket] 连接错误:', error);
+    });
+    
+    socketRef.current.on('disconnect', () => {
+      console.log('[Socket] 与服务器断开连接');
+      socketConnected.current = false;
+    });
+    
+    socketRef.current.on('new_email', (data: { account_id: string; email: any; saved_to_db?: boolean }) => {
+      console.log('[Socket] 收到新邮件:', data);
+      console.log('[Socket] 当前选中账户:', selectedAccountRef.current);
+      console.log('[Socket] 账户ID匹配:', selectedAccountRef.current === data.account_id);
+      
+      if (data.saved_to_db) {
+        setPendingNewEmails(prev => ({
+          ...prev,
+          [data.account_id]: (prev[data.account_id] || 0) + 1
+        }));
+      }
+      
+      if (selectedAccountRef.current === data.account_id) {
+        console.log('[Socket] 添加新邮件到列表');
+        setMessages(prev => {
+          const exists = prev.some(m => m.uid === data.email.uid);
+          if (exists) {
+            console.log('[Socket] 邮件已存在，跳过');
+            return prev;
+          }
+          return [data.email, ...prev];
+        });
+      }
+      
+      setAccounts(prev => prev.map(acc => 
+        acc.id === data.account_id 
+          ? { ...acc, unread_count: acc.unread_count + 1 }
+          : acc
+      ));
+      
+      setShowToast({ 
+        msg: `新邮件: ${data.email.subject || '无主题'}`, 
+        type: 'success' 
+      });
+    });
+    
+    socketRef.current.on('idle_status', (data: { account_id: string; status: string }) => {
+      console.log('[Socket] IDLE状态更新:', data);
+      setIdleStatus(prev => {
+        const newState = { ...prev, [data.account_id]: data.status };
+        console.log('[Socket] 新的IDLE状态:', newState);
+        return newState;
+      });
+    });
+    
+    socketRef.current.on('status', (data: any) => {
+      console.log('[Socket] 服务器状态:', data);
+    });
+    
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+  
+  useEffect(() => {
+    if (selectedAccount && socketConnected.current) {
+      fetch(getServerUrl(`/api/email/accounts/${selectedAccount}/idle/start`), { method: 'POST' });
+    }
+  }, [selectedAccount]);
+  
+  useEffect(() => {
+    if (accounts.length > 0) {
+      accounts.forEach(acc => {
+        fetch(getServerUrl(`/api/email/accounts/${acc.id}/idle/start`), { method: 'POST' }).catch(() => {});
+      });
+    }
+  }, [accounts]);
 
   // 打开编辑弹窗
   const handleEditAccount = async (account: any) => {
     setEditingAccount(account);
     setEditEmail(account.email);
     setEditProvider(account.provider);
+    setEditName(account.name || '');
+    setEditNote(account.note || '');
     setShowEditPassword(false);
 
     // 获取账户详情（包括密码）
@@ -2823,6 +3036,8 @@ function EmailView() {
       const data = await res.json();
       if (data.success) {
         setEditPassword(data.account.password || '');
+        setEditName(data.account.name || '');
+        setEditNote(data.account.note || '');
       } else {
         setEditPassword('');
       }
@@ -2848,7 +3063,9 @@ function EmailView() {
         body: JSON.stringify({
           email: editEmail,
           provider: editProvider,
-          password: editPassword || undefined
+          password: editPassword || undefined,
+          name: editName || undefined,
+          note: editNote || undefined
         })
       });
       const data = await res.json();
@@ -2886,6 +3103,21 @@ function EmailView() {
       const data = await res.json();
       if (data.success) {
         setAccounts(data.accounts);
+        
+        // 获取所有账户的 IDLE 状态
+        try {
+          const statusRes = await fetch(getServerUrl('/api/email/idle/status'));
+          const statusData = await statusRes.json();
+          if (statusData.success && statusData.statuses) {
+            const newIdleStatus: Record<string, string> = {};
+            Object.entries(statusData.statuses).forEach(([accId, status]) => {
+              newIdleStatus[accId] = status as string;
+            });
+            setIdleStatus(newIdleStatus);
+          }
+        } catch (e) {
+          console.error('获取IDLE状态失败:', e);
+        }
       }
     } catch (err) {
       console.error('获取邮箱账户失败:', err);
@@ -3013,7 +3245,13 @@ function EmailView() {
       const res = await fetch(getServerUrl('/api/email/accounts'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: newEmail, password: newPassword, provider: newProvider })
+        body: JSON.stringify({ 
+          email: newEmail, 
+          password: newPassword, 
+          provider: newProvider,
+          name: newName,
+          note: newNote
+        })
       });
       const data = await res.json();
       if (data.success) {
@@ -3022,6 +3260,8 @@ function EmailView() {
         setNewEmail('');
         setNewPassword('');
         setNewProvider('');
+        setNewName('');
+        setNewNote('');
         fetchAccounts();
       } else {
         setShowToast({ msg: data.error || '添加失败', type: 'error' });
@@ -3074,6 +3314,11 @@ function EmailView() {
   const handleSelectAccount = (accountId: string) => {
     setSelectedAccount(accountId);
     fetchMessages(accountId, true);
+    setPendingNewEmails(prev => {
+      const newState = { ...prev };
+      delete newState[accountId];
+      return newState;
+    });
   };
 
   useEffect(() => {
@@ -3096,6 +3341,10 @@ function EmailView() {
         @keyframes spin {
           from { transform: rotate(0deg); }
           to { transform: rotate(360deg); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
         }
       `}</style>
       <div className="page-header" style={{ margin: '-20px -24px 20px -24px', padding: '16px 24px' }}>
@@ -3150,22 +3399,22 @@ function EmailView() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: '20px', height: 'calc(100vh - 180px)' }}>
+      <div style={{ display: 'flex', gap: '20px' }}>
         {/* 第一级：邮箱账户列表 - 默认占满全屏，选择邮箱后隐藏 */}
         {!selectedAccount && (
           <div style={{ flex: 1 }}>
-            <div className="card" style={{ padding: '16px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+            <div className="card" style={{ padding: '16px', display: 'flex', flexDirection: 'column' }}>
               <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px' }}>
                 已绑定邮箱 ({accounts.length})
               </div>
 
               {loading ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
                   <i className="fa-solid fa-circle-notch fa-spin" style={{ marginRight: '8px' }}></i>
                   加载中...
                 </div>
               ) : accounts.length === 0 ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
+                <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column' }}>
                   <div style={{ fontSize: '40px', marginBottom: '12px', opacity: 0.5 }}>
                     <i className="fa-solid fa-envelope"></i>
                   </div>
@@ -3173,8 +3422,19 @@ function EmailView() {
                   <div style={{ fontSize: '12px', marginTop: '8px' }}>点击右上角添加邮箱</div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, overflow: 'auto' }}>
-                  {accounts.map(account => (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                  {accounts.map(account => {
+                    const providerColors: Record<string, {bg: string, color: string}> = {
+                        gmail: { bg: 'rgba(234, 67, 53, 0.1)', color: '#EA4335' },
+                        outlook: { bg: 'rgba(0, 120, 212, 0.1)', color: '#0078D4' },
+                        qq: { bg: 'rgba(18, 183, 245, 0.1)', color: '#12B7F5' },
+                        '163': { bg: 'rgba(206, 35, 38, 0.1)', color: '#CE2326' },
+                        yahoo: { bg: 'rgba(96, 5, 155, 0.1)', color: '#60019B' },
+                        icloud: { bg: 'rgba(0, 0, 0, 0.1)', color: '#333' },
+                      };
+                      const providerStyle = providerColors[account.provider] || { bg: 'rgba(157, 80, 187, 0.1)', color: '#9D50BB' };
+                    
+                    return (
                     <div
                       key={account.id}
                       onClick={() => {
@@ -3183,44 +3443,45 @@ function EmailView() {
                       }}
                       style={{
                         padding: '14px',
-                        borderRadius: '10px',
-                        background: 'rgba(255, 255, 255, 0.5)',
-                        border: '1px solid transparent',
+                        borderRadius: '12px',
+                        background: 'white',
+                        border: '1px solid rgba(0, 0, 0, 0.06)',
                         cursor: 'pointer',
-                        transition: 'all 0.2s'
+                        transition: 'all 0.25s ease',
+                        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-2px)';
+                        e.currentTarget.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.1)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.04)';
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          <div style={{
-                            width: '36px',
-                            height: '36px',
-                            borderRadius: '8px',
-                            background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}>
-                            <i className="fa-solid fa-envelope" style={{ color: 'white', fontSize: '14px' }}></i>
-                          </div>
-                          <div>
-                            <div style={{ fontWeight: 500, fontSize: '13px' }}>{account.email}</div>
-                            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{account.provider}</div>
-                          </div>
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '8px' }}>
+                        <div style={{
+                          width: '40px',
+                          height: '40px',
+                          borderRadius: '10px',
+                          background: providerStyle.bg,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden'
+                        }}>
+                          <img 
+                            src={getEmailIconUrl(account.provider) || `./icons/email/${account.provider}.png`}
+                            alt={account.provider}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none';
+                              e.currentTarget.nextElementSibling?.setAttribute('style', 'display: flex');
+                            }}
+                          />
+                          <i className="fa-solid fa-envelope" style={{ color: providerStyle.color, fontSize: '18px', display: 'none' }}></i>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          {account.unread_count > 0 && (
-                            <span style={{
-                              background: '#EF4444',
-                              color: 'white',
-                              padding: '2px 8px',
-                              borderRadius: '10px',
-                              fontSize: '11px',
-                              fontWeight: 600
-                            }}>
-                              {account.unread_count}
-                            </span>
-                          )}
+                        <div style={{ display: 'flex', gap: '4px' }}>
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -3232,15 +3493,22 @@ function EmailView() {
                               height: '28px',
                               borderRadius: '6px',
                               border: 'none',
-                              background: 'rgba(0, 0, 0, 0.05)',
+                              background: 'rgba(0, 0, 0, 0.04)',
                               color: '#6B7280',
                               cursor: 'pointer',
                               display: 'flex',
                               alignItems: 'center',
-                              justifyContent: 'center'
+                              justifyContent: 'center',
+                              transition: 'all 0.2s'
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.background = 'rgba(0, 0, 0, 0.08)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = 'rgba(0, 0, 0, 0.04)';
                             }}
                           >
-                            <i className="fa-solid fa-pen" style={{ fontSize: '12px' }}></i>
+                            <i className="fa-solid fa-pen" style={{ fontSize: '11px' }}></i>
                           </button>
                           <button
                             onClick={(e) => {
@@ -3253,20 +3521,119 @@ function EmailView() {
                               height: '28px',
                               borderRadius: '6px',
                               border: 'none',
-                              background: 'rgba(239, 68, 68, 0.1)',
+                              background: 'rgba(239, 68, 68, 0.08)',
                               color: '#EF4444',
                               cursor: 'pointer',
                               display: 'flex',
                               alignItems: 'center',
-                              justifyContent: 'center'
+                              justifyContent: 'center',
+                              transition: 'all 0.2s'
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.15)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.08)';
                             }}
                           >
-                            <i className="fa-solid fa-trash" style={{ fontSize: '12px' }}></i>
+                            <i className="fa-solid fa-trash" style={{ fontSize: '11px' }}></i>
                           </button>
                         </div>
                       </div>
+                      
+                      <div style={{ marginBottom: '6px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+                          <span style={{ fontWeight: 600, fontSize: '14px', color: '#1F2937' }}>
+                            {account.name || account.email.split('@')[0]}
+                          </span>
+                          {account.unread_count > 0 && (
+                            <span style={{
+                              background: 'linear-gradient(135deg, #EF4444, #DC2626)',
+                              color: 'white',
+                              padding: '1px 6px',
+                              borderRadius: '10px',
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              minWidth: '18px',
+                              textAlign: 'center'
+                            }}>
+                              {account.unread_count}
+                            </span>
+                          )}
+                          {pendingNewEmails[account.id] > 0 && (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '3px',
+                              background: 'rgba(245, 158, 11, 0.15)',
+                              color: '#F59E0B',
+                              padding: '1px 6px',
+                              borderRadius: '10px',
+                              fontSize: '10px',
+                              fontWeight: 500,
+                              animation: 'pulse 2s infinite'
+                            }}>
+                              <i className="fa-solid fa-envelope" style={{ fontSize: '8px' }}></i>
+                              新邮件
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#6B7280' }}>{account.email}</div>
+                        {account.note && (
+                          <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '2px' }}>
+                            <i className="fa-regular fa-comment" style={{ marginRight: '4px' }}></i>
+                            {account.note}
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '3px 8px',
+                            borderRadius: '5px',
+                            background: providerStyle.bg,
+                            color: providerStyle.color,
+                            fontSize: '11px',
+                            fontWeight: 500
+                          }}>
+                            {account.provider.toUpperCase()}
+                          </span>
+                          {idleStatus[account.id] && (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              background: idleStatus[account.id] === 'listening' 
+                                ? 'rgba(16, 185, 129, 0.1)' 
+                                : 'rgba(107, 114, 128, 0.1)',
+                              color: idleStatus[account.id] === 'listening' ? '#10B981' : '#6B7280',
+                              fontSize: '10px',
+                              fontWeight: 500
+                            }}>
+                              <span style={{
+                                width: '6px',
+                                height: '6px',
+                                borderRadius: '50%',
+                                background: idleStatus[account.id] === 'listening' ? '#10B981' : '#6B7280',
+                                animation: idleStatus[account.id] === 'listening' ? 'pulse 1.5s infinite' : 'none'
+                              }}></span>
+                              {idleStatus[account.id] === 'listening' ? '实时监听' : idleStatus[account.id]}
+                            </span>
+                          )}
+                        </div>
+                        <span style={{ fontSize: '11px', color: '#9CA3AF' }}>
+                          <i className="fa-regular fa-clock" style={{ marginRight: '3px' }}></i>
+                          刚刚同步
+                        </span>
+                      </div>
                     </div>
-                  ))}
+                  );})}
                 </div>
               )}
             </div>
@@ -3307,21 +3674,71 @@ function EmailView() {
                       </div>
                     </div>
                   </div>
-                  <button
-                    onClick={() => syncEmails(selectedAccount)}
-                    style={{
-                      padding: '6px 12px',
-                      borderRadius: '6px',
-                      border: 'none',
-                      background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
-                      color: 'white',
-                      fontSize: '12px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    <i className="fa-solid fa-sync-alt" style={{ marginRight: '4px' }}></i>
-                    同步
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {pendingNewEmails[selectedAccount] > 0 && (
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        padding: '4px 10px',
+                        borderRadius: '4px',
+                        background: 'rgba(245, 158, 11, 0.1)',
+                        color: '#F59E0B',
+                        fontSize: '11px',
+                        fontWeight: 500,
+                        animation: 'pulse 2s infinite'
+                      }}>
+                        <i className="fa-solid fa-envelope" style={{ fontSize: '10px' }}></i>
+                        有 {pendingNewEmails[selectedAccount]} 封新邮件，请同步
+                      </span>
+                    )}
+                    <button
+                      onClick={() => {
+                        syncEmails(selectedAccount);
+                        setPendingNewEmails(prev => {
+                          const newState = { ...prev };
+                          delete newState[selectedAccount];
+                          return newState;
+                        });
+                      }}
+                      disabled={syncing}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '6px',
+                        border: 'none',
+                        background: 'linear-gradient(135deg, #9D50BB, #6E48AA)',
+                        color: 'white',
+                        fontSize: '12px',
+                        cursor: syncing ? 'not-allowed' : 'pointer',
+                        opacity: syncing ? 0.7 : 1
+                      }}
+                    >
+                      <i className={`fa-solid ${syncing ? 'fa-circle-notch fa-spin' : 'fa-sync-alt'}`} style={{ marginRight: '4px' }}></i>
+                      {syncing ? '同步中' : '同步'}
+                    </button>
+                    {idleStatus[selectedAccount] === 'listening' && (
+                      <span style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        padding: '4px 10px',
+                        borderRadius: '4px',
+                        background: 'rgba(16, 185, 129, 0.1)',
+                        color: '#10B981',
+                        fontSize: '11px',
+                        fontWeight: 500
+                      }}>
+                        <span style={{
+                          width: '6px',
+                          height: '6px',
+                          borderRadius: '50%',
+                          background: '#10B981',
+                          animation: 'pulse 1.5s infinite'
+                        }}></span>
+                        实时监听中
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* 邮件列表 */}
@@ -3399,14 +3816,21 @@ function EmailView() {
                                 onClick={async () => {
                                   const subject = encodeURIComponent(`Re: ${msg.subject || ''}`);
                                   const to = encodeURIComponent(msg.sender_email);
+                                  const uid = msg.uid || '';
                                   
                                   let replyUrl = '';
                                   if (selectedAccountData?.provider === 'gmail') {
                                     replyUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${subject}`;
                                   } else if (selectedAccountData?.provider === 'qq') {
-                                    replyUrl = `https://mail.qq.com/cgi-bin/frame_html?t=compose&to=${to}&subject=${subject}`;
+                                    if (uid) {
+                                      replyUrl = `https://mail.qq.com/cgi-bin/readmail?mailid=${uid}&t=compose&to=${to}&subject=${subject}`;
+                                    } else {
+                                      replyUrl = `https://mail.qq.com/cgi-bin/frame_html?t=compose&to=${to}&subject=${subject}`;
+                                    }
                                   } else if (selectedAccountData?.provider === '163') {
-                                    replyUrl = `https://mail.163.com/js6/main.jsp?sid=&to=${to}&subject=${subject}`;
+                                    replyUrl = `https://mail.163.com/`;
+                                  } else if (selectedAccountData?.provider === 'outlook') {
+                                    replyUrl = `https://outlook.live.com/mail/0/`;
                                   } else {
                                     replyUrl = `mailto:${msg.sender_email}?subject=${subject}`;
                                   }
@@ -3722,8 +4146,30 @@ ${selectedMessage.body_html}
                 />
               </div>
 
+              {/* 名称 */}
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  名称 <span style={{ color: '#9CA3AF' }}>(可选)</span>
+                </label>
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={e => setNewName(e.target.value)}
+                  placeholder="给邮箱起个名字"
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    border: '1px solid rgba(0, 0, 0, 0.1)',
+                    borderRadius: '10px',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
               {/* 密码/授权码 */}
-              <div style={{ marginBottom: '20px' }}>
+              <div style={{ marginBottom: '16px' }}>
                 <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
                   密码或授权码
                 </label>
@@ -3771,6 +4217,29 @@ ${selectedMessage.body_html}
                   <div>• Gmail：安全性 → 两步验证 → 应用专用密码</div>
                   <div>• 163邮箱：设置 → 账户 → 开启IMAP → 授权码</div>
                 </div>
+              </div>
+
+              {/* 备注 */}
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  备注 <span style={{ color: '#9CA3AF' }}>(可选)</span>
+                </label>
+                <textarea
+                  value={newNote}
+                  onChange={e => setNewNote(e.target.value)}
+                  placeholder="添加备注信息"
+                  rows={2}
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    border: '1px solid rgba(0, 0, 0, 0.1)',
+                    borderRadius: '10px',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                    resize: 'none'
+                  }}
+                />
               </div>
 
               {/* 提交按钮 */}
@@ -3899,8 +4368,29 @@ ${selectedMessage.body_html}
               />
             </div>
 
+            {/* 名称 */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#4B5563' }}>名称 <span style={{ color: '#9CA3AF' }}>(可选)</span></label>
+              <input
+                type="text"
+                value={editName}
+                onChange={e => setEditName(e.target.value)}
+                placeholder="给邮箱起个名字"
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '2px solid #E5E7EB',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  transition: 'border-color 0.2s'
+                }}
+              />
+            </div>
+
             {/* 授权码/密码 */}
-            <div style={{ marginBottom: '20px' }}>
+            <div style={{ marginBottom: '16px' }}>
               <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#4B5563' }}>授权码/密码</label>
               <div style={{ position: 'relative' }}>
                 <input
@@ -3937,6 +4427,28 @@ ${selectedMessage.body_html}
                   <i className={`fa-solid ${showEditPassword ? 'fa-eye-slash' : 'fa-eye'}`}></i>
                 </button>
               </div>
+            </div>
+
+            {/* 备注 */}
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: '#4B5563' }}>备注 <span style={{ color: '#9CA3AF' }}>(可选)</span></label>
+              <textarea
+                value={editNote}
+                onChange={e => setEditNote(e.target.value)}
+                placeholder="添加备注信息"
+                rows={2}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '2px solid #E5E7EB',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  transition: 'border-color 0.2s',
+                  resize: 'none'
+                }}
+              />
             </div>
 
             {/* 操作按钮 */}
@@ -5603,8 +6115,7 @@ function CalendarView() {
   );
 }
 
-function AIChatView({ messages, inputMessage, isTyping, onInputChange, onSend, onKeyPress }: any) {
-  // 解析结构化错误信息
+function AIChatView({ messages, inputMessage, isTyping, onInputChange, onSend, onKeyPress, onOpenSettings, isFullScreen, onExitFullScreen }: any) {
   const parseError = (response: string): { isError: boolean; shortMsg: string; detailMsg: string } => {
     if (response.startsWith('__ERROR__|')) {
       const parts = response.split('|');
@@ -5648,11 +6159,32 @@ function AIChatView({ messages, inputMessage, isTyping, onInputChange, onSend, o
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <header className="page-header">
-        <div>
-          <h1 className="page-title">AI Assistant</h1>
-          <p className="page-subtitle">Your intelligent workspace companion</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          {isFullScreen && (
+            <button
+              onClick={onExitFullScreen}
+              style={{
+                padding: '8px',
+                background: 'transparent',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                color: '#6B7280'
+              }}
+              title="退出全屏"
+            >
+              <i className="fa-solid fa-arrow-left" style={{ fontSize: '14px' }}></i>
+            </button>
+          )}
+          <div>
+            <h1 className="page-title">AI Assistant</h1>
+            <p className="page-subtitle">Your intelligent workspace companion</p>
+          </div>
         </div>
         <div className="header-actions">
+          <button className="icon-btn" title="AI 设置" onClick={onOpenSettings}>
+            <i className="fa-solid fa-sliders-h"></i>
+          </button>
           <a href="https://github.com/su-Insight" target="_blank" rel="noopener noreferrer" className="icon-btn" title="GitHub">
             <i className="fa-brands fa-github"></i>
           </a>
@@ -5730,10 +6262,253 @@ function AIChatView({ messages, inputMessage, isTyping, onInputChange, onSend, o
   );
 }
 
+function GeneralSettingsView() {
+  const [activeTab, setActiveTab] = useState('features');
+  const [featureToggles, setFeatureToggles] = useState(() => {
+    const saved = localStorage.getItem('deskmate_featureToggles');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        return { ai: true, email: true, secrets: false, tasks: true, calendar: false, files: true };
+      }
+    }
+    return { ai: true, email: true, secrets: false, tasks: true, calendar: false, files: true };
+  });
+
+  const [aiPanelFoldMode, setAiPanelFoldMode] = useState(() => {
+    const saved = localStorage.getItem('deskmate_aiPanelFoldMode');
+    return saved || 'manual';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('deskmate_featureToggles', JSON.stringify(featureToggles));
+  }, [featureToggles]);
+
+  useEffect(() => {
+    localStorage.setItem('deskmate_aiPanelFoldMode', aiPanelFoldMode);
+  }, [aiPanelFoldMode]);
+
+  const tabs = [
+    { id: 'features', name: '功能管理', icon: 'fa-th-large' },
+    { id: 'global', name: '全局配置', icon: 'fa-globe' },
+  ];
+
+  const features = [
+    { id: 'ai', name: 'AI 助手', icon: 'fa-robot', color: '#9D50BB', desc: '智能对话、代码生成、文档写作' },
+    { id: 'email', name: '邮箱管理', icon: 'fa-envelope', color: '#3B82F6', desc: '多邮箱绑定、邮件同步、实时推送' },
+    { id: 'secrets', name: '密码管理', icon: 'fa-key', color: '#10B981', desc: '安全存储账号密码、加密保护' },
+    { id: 'tasks', name: '任务管理', icon: 'fa-check-square', color: '#F59E0B', desc: '待办事项、任务追踪、提醒通知' },
+    { id: 'calendar', name: '日历', icon: 'fa-calendar', color: '#EF4444', desc: '日程安排、事件提醒、时间管理' },
+    { id: 'files', name: '文件管理', icon: 'fa-folder', color: '#6366F1', desc: '文件浏览、远程连接、文件传输' }
+  ];
+
+  const handleToggleFeature = (featureId: string) => {
+    setFeatureToggles((prev: Record<string, boolean>) => ({
+      ...prev,
+      [featureId]: !prev[featureId]
+    }));
+  };
+
+  return (
+    <div>
+      <header className="page-header">
+        <h1 className="page-title">
+          <i className="fa-solid fa-cog" style={{ marginRight: '8px', color: '#6B7280' }}></i>
+          设置
+        </h1>
+      </header>
+
+      <div style={{ display: 'flex', gap: '20px' }}>
+        <div style={{ width: '160px', flexShrink: 0 }}>
+          <div className="card" style={{ padding: '8px' }}>
+            {tabs.map(tab => (
+              <div
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  background: activeTab === tab.id ? 'rgba(107, 114, 128, 0.1)' : 'transparent',
+                  color: activeTab === tab.id ? '#374151' : '#6B7280',
+                  marginBottom: '4px',
+                  transition: 'all 0.2s',
+                  fontSize: '13px'
+                }}
+              >
+                <i className={`fa-solid ${tab.icon}`} style={{ width: '16px' }}></i>
+                <span style={{ fontWeight: activeTab === tab.id ? 500 : 400 }}>{tab.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ flex: 1 }}>
+          {activeTab === 'features' && (
+            <div className="card" style={{ padding: '24px' }}>
+              <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <i className="fa-solid fa-th-large" style={{ color: '#6B7280' }}></i>
+                功能管理
+              </h3>
+              <p style={{ fontSize: '13px', color: '#6B7280', marginBottom: '20px' }}>
+                开启或关闭各个功能模块，关闭后左侧导航栏将隐藏对应入口
+              </p>
+              
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+                {features.map(feature => (
+                  <div
+                    key={feature.id}
+                    style={{
+                      padding: '20px',
+                      background: featureToggles[feature.id] ? 'white' : 'rgba(0,0,0,0.02)',
+                      border: `2px solid ${featureToggles[feature.id] ? feature.color : 'rgba(0,0,0,0.08)'}`,
+                      borderRadius: '12px',
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: '16px',
+                      transition: 'all 0.2s',
+                      opacity: featureToggles[feature.id] ? 1 : 0.7
+                    }}
+                  >
+                    <div style={{
+                      width: '48px',
+                      height: '48px',
+                      borderRadius: '12px',
+                      background: featureToggles[feature.id] ? `${feature.color}15` : 'rgba(0,0,0,0.05)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0
+                    }}>
+                      <i className={`fa-solid ${feature.icon}`} style={{ 
+                        fontSize: '20px', 
+                        color: featureToggles[feature.id] ? feature.color : '#9CA3AF' 
+                      }}></i>
+                    </div>
+                    
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                        <span style={{ fontSize: '14px', fontWeight: 600, color: '#374151' }}>{feature.name}</span>
+                        <div
+                          onClick={() => handleToggleFeature(feature.id)}
+                          style={{
+                            width: '44px',
+                            height: '24px',
+                            borderRadius: '12px',
+                            background: featureToggles[feature.id] ? feature.color : 'rgba(0,0,0,0.1)',
+                            position: 'relative',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                          }}
+                        >
+                          <div style={{
+                            width: '20px',
+                            height: '20px',
+                            borderRadius: '10px',
+                            background: 'white',
+                            position: 'absolute',
+                            top: '2px',
+                            left: featureToggles[feature.id] ? '22px' : '2px',
+                            transition: 'all 0.2s',
+                            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                          }}></div>
+                        </div>
+                      </div>
+                      <p style={{ fontSize: '12px', color: '#6B7280', margin: 0 }}>{feature.desc}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'global' && (
+            <div className="card" style={{ padding: '24px' }}>
+              <h3 style={{ fontSize: '15px', fontWeight: 600, marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <i className="fa-solid fa-globe" style={{ color: '#6B7280' }}></i>
+                全局配置
+              </h3>
+              
+              <div style={{ marginBottom: '24px' }}>
+                <h4 style={{ fontSize: '14px', fontWeight: 500, marginBottom: '12px', color: '#374151' }}>
+                  AI 聊天框折叠模式
+                </h4>
+                <p style={{ fontSize: '12px', color: '#6B7280', marginBottom: '16px' }}>
+                  设置右侧 AI 聊天框在切换功能界面时的行为
+                </p>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '12px',
+                      padding: '16px',
+                      background: aiPanelFoldMode === 'manual' ? 'rgba(107, 114, 128, 0.05)' : 'transparent',
+                      border: `2px solid ${aiPanelFoldMode === 'manual' ? '#6B7280' : 'rgba(0,0,0,0.08)'}`,
+                      borderRadius: '10px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="aiPanelFoldMode"
+                      value="manual"
+                      checked={aiPanelFoldMode === 'manual'}
+                      onChange={() => setAiPanelFoldMode('manual')}
+                      style={{ width: '18px', height: '18px', accentColor: '#6B7280' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: 500, color: '#374151' }}>手动折叠</div>
+                      <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '2px' }}>用户自行控制折叠状态，切换界面时保持当前状态</div>
+                    </div>
+                  </label>
+                  
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '12px',
+                      padding: '16px',
+                      background: aiPanelFoldMode === 'auto' ? 'rgba(107, 114, 128, 0.05)' : 'transparent',
+                      border: `2px solid ${aiPanelFoldMode === 'auto' ? '#6B7280' : 'rgba(0,0,0,0.08)'}`,
+                      borderRadius: '10px',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="aiPanelFoldMode"
+                      value="auto"
+                      checked={aiPanelFoldMode === 'auto'}
+                      onChange={() => setAiPanelFoldMode('auto')}
+                      style={{ width: '18px', height: '18px', accentColor: '#6B7280' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: 500, color: '#374151' }}>自动折叠</div>
+                      <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '2px' }}>切换功能界面时自动折叠 AI 聊天框</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView() {
   const [activeTab, setActiveTab] = useState('provider-hub');
-  const [showApiConfig, setShowApiConfig] = useState(false); // 控制API配置内容显示
-  const [selectedProvider, setSelectedProvider] = useState('deepseek'); // 默认选中第一个厂商
+  const [showApiConfig, setShowApiConfig] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState('deepseek');
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
@@ -5755,11 +6530,14 @@ function SettingsView() {
   const [speedTesting, setSpeedTesting] = useState<Set<string>>(new Set());
   const [showApiKeyPassword, setShowApiKeyPassword] = useState(false);
 
-  // 删除确认弹窗状态
+  const handleBackToAI = () => {
+    const event = new CustomEvent('navigateToAI');
+    window.dispatchEvent(event);
+  };
+
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [configToDelete, setConfigToDelete] = useState<string | null>(null);
 
-  // 测速结果类型
   type SpeedTestResult = {
     time: string;
     color: string;
@@ -5768,7 +6546,6 @@ function SettingsView() {
     rawError?: string;
   };
 
-  // 动态获取 deskmate API
   const getDeskmateApi = () => {
     const deskmateApi = (window as any).deskmate;
     if (!deskmateApi) {
@@ -5858,14 +6635,12 @@ function SettingsView() {
     // { id: 'anthropic', name: 'Claude', icon: 'fa-comments', color: '#D97757', models: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'], defaultUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-3-5-sonnet-20241022', websiteUrl: 'https://www.anthropic.com' },
   ];
 
-  // Tab 配置 - API配置默认隐藏，通过新建配置按钮访问
   const tabs = [
     { id: 'provider-hub', name: 'Provider Hub', icon: 'fa-server' },
     { id: 'model-config', name: '模型配置', icon: 'fa-sliders-h' },
     { id: 'profile', name: '用户画像', icon: 'fa-user' },
   ];
 
-  // 拖动排序处理
   const handleDragStart = (index: number) => {
     dragItemRef.current = index;
   };
@@ -6349,10 +7124,26 @@ function SettingsView() {
   return (
     <div>
       <header className="page-header">
-        <h1 className="page-title">
-          <i className="fa-solid fa-cog" style={{ marginRight: '8px', color: '#9D50BB' }}></i>
-          Settings
-        </h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button
+            onClick={handleBackToAI}
+            style={{
+              padding: '8px',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              color: '#6B7280'
+            }}
+            title="返回"
+          >
+            <i className="fa-solid fa-arrow-left" style={{ fontSize: '14px' }}></i>
+          </button>
+          <h1 className="page-title">
+            <i className="fa-solid fa-sliders-h" style={{ marginRight: '8px', color: '#9D50BB' }}></i>
+            AI 设置
+          </h1>
+        </div>
       </header>
 
       <div style={{ display: 'flex', gap: '20px' }}>
@@ -7212,7 +8003,7 @@ function SettingsView() {
   );
 }
 
-function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onNavigate: (nav: string) => void }) {
+function CommunicationPanel({ messages, onNavigate, isFullScreen }: { messages: Message[]; onNavigate: (nav: string) => void; isFullScreen?: boolean }) {
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -7704,8 +8495,11 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
 
   return (
     <>
-      <div className="panel-header">
-        <span className="panel-title">
+      <div className="panel-header" style={{
+        padding: isFullScreen ? '16px 24px' : undefined,
+        borderBottom: isFullScreen ? '1px solid rgba(0,0,0,0.06)' : undefined
+      }}>
+        <span className="panel-title" style={{ fontSize: isFullScreen ? '18px' : undefined }}>
           <i className="fa-solid fa-robot" style={{ marginRight: '8px', color: '#9D50BB' }}></i>
           AI Assistant
         </span>
@@ -7713,19 +8507,19 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
           <button className="panel-action-btn" title="New Chat">
             <i className="fa-solid fa-plus"></i>
           </button>
-          <button className="panel-action-btn" title="Settings" onClick={() => onNavigate('settings')}>
+          <button className="panel-action-btn" title="AI Settings" onClick={() => onNavigate('ai-settings')}>
             <i className="fa-solid fa-cog"></i>
           </button>
         </div>
       </div>
 
-      <div style={{ padding: '12px 20px', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
+      <div style={{ padding: isFullScreen ? '16px 24px' : '12px 20px', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
         <div style={{ display: 'flex', gap: '8px' }}>
-          <button className="ai-mode-btn active" style={{ flex: 1, padding: '8px 12px', borderRadius: '8px', border: 'none', background: 'rgba(157, 80, 187, 0.12)', color: '#6E48AA', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>
+          <button className="ai-mode-btn active" style={{ flex: 1, padding: isFullScreen ? '10px 16px' : '8px 12px', borderRadius: '8px', border: 'none', background: 'rgba(157, 80, 187, 0.12)', color: '#6E48AA', cursor: 'pointer', fontSize: isFullScreen ? '13px' : '12px', fontWeight: 500 }}>
             <i className="fa-solid fa-brain" style={{ marginRight: '4px' }}></i>
             Private
           </button>
-          <button className="ai-mode-btn" style={{ flex: 1, padding: '8px 12px', borderRadius: '8px', border: '1px solid rgba(0,0,0,0.08)', background: 'transparent', color: '#6B7280', cursor: 'pointer', fontSize: '12px' }}>
+          <button className="ai-mode-btn" style={{ flex: 1, padding: isFullScreen ? '10px 16px' : '8px 12px', borderRadius: '8px', border: '1px solid rgba(0,0,0,0.08)', background: 'transparent', color: '#6B7280', cursor: 'pointer', fontSize: isFullScreen ? '13px' : '12px' }}>
             <i className="fa-solid fa-eye-slash" style={{ marginRight: '4px' }}></i>
             Incognito
           </button>
@@ -7735,7 +8529,7 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {isConfigMissing && (
           <div style={{
-            padding: '12px 20px',
+            padding: isFullScreen ? '16px 24px' : '12px 20px',
             background: 'rgba(245, 158, 11, 0.1)',
             borderBottom: '1px solid rgba(245, 158, 11, 0.2)',
           }}>
@@ -7748,14 +8542,14 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
             </div>
           </div>
         )}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: isFullScreen ? '20px 24px' : '16px 20px' }}>
           {allMessages.length === 0 ? (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center', color: '#6B7280' }}>
-              <div style={{ width: '48px', height: '48px', borderRadius: '14px', background: 'linear-gradient(135deg, #9D50BB, #6E48AA)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '12px' }}>
-                <i className="fa-solid fa-robot" style={{ fontSize: '20px', color: 'white' }}></i>
+              <div style={{ width: isFullScreen ? '72px' : '48px', height: isFullScreen ? '72px' : '48px', borderRadius: '14px', background: 'linear-gradient(135deg, #9D50BB, #6E48AA)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '12px' }}>
+                <i className="fa-solid fa-robot" style={{ fontSize: isFullScreen ? '28px' : '20px', color: 'white' }}></i>
               </div>
-              <p style={{ fontSize: '13px', marginBottom: '8px' }}>How can I help you?</p>
-              <p style={{ fontSize: '11px', color: '#9CA3AF' }}>Ask me anything about your work</p>
+              <p style={{ fontSize: isFullScreen ? '15px' : '13px', marginBottom: '8px' }}>How can I help you?</p>
+              <p style={{ fontSize: isFullScreen ? '13px' : '11px', color: '#9CA3AF' }}>Ask me anything about your work</p>
             </div>
           ) : (
             allMessages.map((msg, i) => (
@@ -7769,11 +8563,9 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
                 </div>
                 <div className={`chat-bubble ${msg.role === 'user' ? 'mine' : 'other'}`}>
                   {msg.role === 'assistant' ? (
-                    // 流式过程中边接收边渲染 Markdown，添加光标效果
                     (isStreaming || typewriterIndex >= 0) && i === allMessages.length - 1 ? (
                       <div className="markdown-content" style={{ position: 'relative' }}>
                         {renderMessageContent(msg.content)}
-                        {/* 光标效果 */}
                         {typewriterIndex > 0 && typewriterIndex < msg.content.length && (
                           <span style={{
                             position: 'absolute',
@@ -7813,7 +8605,7 @@ function CommunicationPanel({ messages, onNavigate }: { messages: Message[]; onN
           )}
         </div>
 
-        <div style={{ padding: '12px 20px', borderTop: '1px solid rgba(0,0,0,0.06)' }}>
+        <div style={{ padding: isFullScreen ? '16px 24px' : '12px 20px', borderTop: '1px solid rgba(0,0,0,0.06)' }}>
           <div className="chat-input-row">
             <button className="chat-mic-btn"><i className="fa-solid fa-microphone"></i></button>
             <input

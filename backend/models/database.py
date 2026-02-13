@@ -107,5 +107,13 @@ class DatabaseManager:
             for k, v, t, d in defaults:
                 conn.execute("INSERT OR IGNORE INTO ai_config (config_key, config_value, config_type, description) VALUES (?, ?, ?, ?)", (k, v, t, d))
 
+    def get_email_account(self, account_id: str):
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM email_accounts WHERE id = ?", (account_id,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
 
 db = DatabaseManager()
