@@ -232,29 +232,32 @@ html, body {
   justify-content: center;
 }
 
-/* Glass Effect - 玻璃磨砂效果 */
-:root {
-  --glass-bg: rgba(255, 255, 255, 0.65);
-  --glass-border: rgba(255, 255, 255, 0.4);
-  --glass-shadow: 0 8px 32px rgba(31, 38, 135, 0.08);
-}
-
-/* Cards */
+/* Cards - 3D Glass Effect */
 .card {
-  background: var(--glass-bg);
+  background: linear-gradient(135deg,
+    rgba(255, 255, 255, 0.85) 0%,
+    rgba(255, 255, 255, 0.7) 50%,
+    rgba(255, 255, 255, 0.8) 100%
+  );
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid var(--glass-border);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: var(--radius-card);
-  box-shadow: var(--glass-shadow);
+  box-shadow:
+    0 8px 32px rgba(31, 38, 135, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.2);
   overflow: hidden;
-  transition: all 0.25s ease;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .card:hover {
-  box-shadow: 0 12px 40px rgba(31, 38, 135, 0.12);
-  transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.6);
+  transform: translateY(-4px);
+  box-shadow:
+    0 16px 48px rgba(31, 38, 135, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.7);
 }
 
 /* Stats Grid */
@@ -756,7 +759,7 @@ html, body {
 
 /* 气泡 */
 .chat-bubble {
-  max-width: 75%;
+  max-width: 85%;
   padding: 10px 14px;
   border-radius: 14px;
   font-size: 13px;
@@ -784,7 +787,7 @@ html, body {
 /* Chat Input */
 .chat-input-area {
   padding: 12px 20px;
-  background: rgba(255, 255, 255, 0.5);
+  background: rgb(255, 255, 255);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid rgba(255, 255, 255, 0.3);
@@ -799,9 +802,9 @@ html, body {
 .chat-input {
   flex: 1;
   padding: 10px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.836);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.7);
+  background: rgba(216, 212, 212, 0.815);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   font-size: 13px;
@@ -878,6 +881,11 @@ html, body {
   40% { transform: scale(1); opacity: 1; }
 }
 
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 /* Utility */
 .flex { display: flex; }
 .flex-col { flex-direction: column; }
@@ -927,6 +935,13 @@ html, body {
 /* Resize Handle Hover */
 .resize-handle:hover {
   background: rgba(157, 80, 187, 0.2);
+}
+
+/* List Item Hover Effect */
+.list-item-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.95) 100%) !important;
 }
 
 /* Right Panel Collapse Transition */

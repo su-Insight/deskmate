@@ -6,7 +6,16 @@
       "Bash(dir:*)",
       "Bash(tsc:*)",
       "Bash(npx tsc:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(git stash pop:*)",
+      "Bash(npx vite:*)",
+      "Bash(python -c:*)",
+      "Bash(python:*)",
+      "Bash(del:*)",
+      "Bash(git checkout:*)",
+      "Bash(npm run build)",
+      "Bash(cd:*)"
     ]
   }
 }
